@@ -1,6 +1,16 @@
 # light_vector_db
 
+[![Status](https://img.shields.io/badge/status-work%20in%20progress-orange.svg)](#-project-status)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Rust 2024](https://img.shields.io/badge/rust-2024%20edition-dea584.svg)](https://www.rust-lang.org/)
+
 `light_vector_db` is a local-first Rust library for storing and searching embedding vectors. It does **not** generate embeddings: your application supplies `Vec<f32>` values from any model or provider. That keeps the database small, portable, and model-independent.
+
+> ## 🚧 Project status
+>
+> **Work in progress.** This is an actively evolving learning project, not a
+> production database. The public API may change without notice between versions,
+> and it is not yet published to crates.io. Issues, ideas, and feedback are welcome.
 
 ## What it provides
 
@@ -8,19 +18,33 @@
 - Cosine-similarity search
 - Insert, upsert, get, and delete operations
 - String metadata and metadata-filtered search
-- JSON persistence for local use
+- JSON persistence for local use (atomic, crash-safe writes)
 - Validation for empty, non-finite, and mismatched vectors
+
+## Roadmap
+
+- [x] In-memory, fixed-dimension collections
+- [x] Brute-force cosine-similarity search
+- [x] Insert / upsert / get / delete
+- [x] Metadata + metadata-filtered search
+- [x] JSON persistence with atomic saves
+- [x] Input validation (empty / non-finite / dimension mismatch)
+- [ ] Benchmarks on realistic vector sizes
+- [ ] Approximate nearest-neighbour index (HNSW) for large collections
+- [ ] Optional embedding-provider integrations (e.g. a local Ollama helper)
 
 ## Use it from another Rust project
 
-Until this crate is published on crates.io, depend on a Git revision or local path:
+This crate is not on crates.io yet, so depend on the Git repository or a local path:
 
 ```toml
 [dependencies]
-light_vector_db = { path = "../vector_db" }
-```
+# From GitHub:
+light_vector_db = { git = "https://github.com/Rio3210/light_vector_db" }
 
-The Cargo package name uses an underscore, while Rust imports use the same name:
+# Or from a local checkout:
+# light_vector_db = { path = "../light_vector_db" }
+```
 
 ```rust
 use light_vector_db::{Metadata, Record, VectorDb};
@@ -62,10 +86,20 @@ Every record and query in one `VectorDb` must have the same dimension and should
 ## Run the included demo
 
 ```powershell
-cargo run
-cargo test
+cargo run     # runs the demo in src/main.rs
+cargo test    # runs the test suite
 ```
 
-## Publishing later
+## Contributing
 
-Before publishing to crates.io, add your repository URL, choose a license, write a changelog, and run `cargo publish --dry-run`. The public library API is intentionally independent from any embedding provider, so integrations can be added later as optional features.
+This is a personal learning project, but suggestions and bug reports via GitHub
+issues are appreciated. If you open a pull request, please run `cargo fmt`,
+`cargo clippy --all-targets -- -D warnings`, and `cargo test` first.
+
+## License
+
+Licensed under the [MIT License](LICENSE).
+
+> Note: the Rust ecosystem also commonly dual-licenses as `MIT OR Apache-2.0`.
+> If you later prefer that, add an `Apache-2.0` license file and update the
+> `license` field in `Cargo.toml` to `"MIT OR Apache-2.0"`.

@@ -2,6 +2,12 @@
 name = "light_vector_db"
 version = "0.1.0"
 edition = "2024"
+description = "A local-first, dependency-light vector database for storing and searching embeddings."
+license = "MIT"
+repository = "https://github.com/Rio3210/light_vector_db"
+readme = "README.md"
+keywords = ["vector", "database", "embeddings", "search", "similarity"]
+categories = ["database-implementations"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
