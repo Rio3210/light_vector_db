@@ -90,6 +90,22 @@ cargo run     # runs the demo in src/main.rs
 cargo test    # runs the test suite
 ```
 
+## Benchmarks
+
+A minimal, dependency-free benchmark scaffold measures insert and brute-force
+search on a fixed dimension with deterministic sample data:
+
+```powershell
+cargo bench            # runs benches/vector_ops.rs in release mode
+```
+
+It reports total time and average time per operation for inserting records and
+running searches over an in-memory collection. The scaffold is intentionally
+simple and easy to extend — adjust `DIMENSION`, `RECORD_COUNT`, and
+`SEARCH_ITERATIONS` in `benches/vector_ops.rs`, or add new benchmark functions
+alongside the existing ones. It does not implement or measure any approximate
+nearest-neighbour index.
+
 ## Contributing
 
 This is a personal learning project, but suggestions and bug reports via GitHub
