@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 mod ann;
 mod index;
+mod storage;
 
 pub use ann::{AnnIndex, AnnParams};
 pub use index::{BruteForce, VectorIndex};
@@ -50,12 +51,22 @@ pub struct SearchResult {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum VectorDbError {
-    DimensionMismatch { expected: usize, actual: usize },
+    DimensionMismatch {
+        expected: usize,
+        actual: usize,
+    },
     DuplicateId(u64),
     InvalidVector(&'static str),
     NotFound(u64),
     Io(std::io::Error),
     Serialization(serde_json::Error),
+    /// A `.lvdb` file is malformed or truncated.
+    Corrupt(&'static str),
+    /// A `.lvdb` file uses a newer major format version than this build supports.
+    UnsupportedVersion {
+        major: u16,
+        minor: u16,
+    },
 }
 
 impl fmt::Display for VectorDbError {
@@ -70,6 +81,10 @@ impl fmt::Display for VectorDbError {
             Self::NotFound(id) => write!(f, "no record with id {id}"),
             Self::Io(error) => write!(f, "I/O error: {error}"),
             Self::Serialization(error) => write!(f, "database serialization error: {error}"),
+            Self::Corrupt(message) => write!(f, "corrupt .lvdb file: {message}"),
+            Self::UnsupportedVersion { major, minor } => {
+                write!(f, "unsupported .lvdb format version {major}.{minor}")
+            }
         }
     }
 }
@@ -378,6 +393,39 @@ impl VectorDb {
         Ok(db)
     }
 
+    /// Save the database to a compact, portable `.lvdb` binary file.
+    ///
+    /// Written to a temporary file and atomically renamed, so an interrupted
+    /// save never corrupts an existing file. The search index is not stored
+    /// (it is rebuilt on load); only the records and configuration are.
+    pub fn save_lvdb(&self, path: impl AsRef<Path>) -> Result<(), VectorDbError> {
+        let path = path.as_ref();
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent)?;
+        let bytes = storage::encode(self.dimension, self.index_kind, &self.records);
+        let temporary = path.with_extension("lvdb.tmp");
+        fs::write(&temporary, bytes)?;
+        fs::rename(temporary, path)?;
+        Ok(())
+    }
+
+    /// Load a database from a `.lvdb` binary file, rebuilding the search index.
+    ///
+    /// Returns [`VectorDbError::Corrupt`] for a malformed or truncated file and
+    /// [`VectorDbError::UnsupportedVersion`] for a newer major format version.
+    pub fn load_lvdb(path: impl AsRef<Path>) -> Result<Self, VectorDbError> {
+        let (dimension, index_kind, records) = storage::decode(&fs::read(path)?)?;
+        let mut db = Self::empty(None, index_kind).expect("no dimension cannot fail");
+        db.dimension = dimension;
+        db.records = records;
+        db.validate_database()?;
+        db.rebuild_index()?;
+        Ok(db)
+    }
+
     fn validate_vector(&mut self, vector: &[f32]) -> Result<(), VectorDbError> {
         validate_numbers(vector)?;
         match self.dimension {
@@ -581,6 +629,44 @@ mod tests {
         let loaded = VectorDb::load_from_path(&path).unwrap();
         assert_eq!(loaded.index_kind(), IndexKind::Hnsw(AnnParams::default()));
         assert_eq!(loaded.search(&[0.9, 0.0, 0.1], 1).unwrap()[0].record.id, 1);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn lvdb_binary_round_trip() {
+        let path = temp_path("bin");
+        let mut db = VectorDb::with_index(3, IndexKind::Hnsw(AnnParams::default())).unwrap();
+        db.insert(record(1, vec![1.0, 0.0, 0.0]).with_metadata("topic", "rust"))
+            .unwrap();
+        db.insert(record(2, vec![0.0, 0.0, 1.0]).with_metadata("topic", "db"))
+            .unwrap();
+        db.save_lvdb(&path).unwrap();
+
+        let loaded = VectorDb::load_lvdb(&path).unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded.dimension(), Some(3));
+        assert_eq!(loaded.index_kind(), IndexKind::Hnsw(AnnParams::default()));
+        assert_eq!(loaded.get(1).unwrap().metadata["topic"], "rust");
+        assert_eq!(loaded.get(1).unwrap().vector, vec![1.0, 0.0, 0.0]);
+        // The index was rebuilt on load, so search works.
+        assert_eq!(loaded.search(&[0.9, 0.0, 0.1], 1).unwrap()[0].record.id, 1);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn lvdb_rejects_corrupt_file() {
+        let path = temp_path("corrupt");
+        let mut db = VectorDb::with_dimension(2).unwrap();
+        db.insert(record(1, vec![1.0, 0.0])).unwrap();
+        db.save_lvdb(&path).unwrap();
+
+        let mut bytes = fs::read(&path).unwrap();
+        bytes[0] = b'X'; // clobber the magic
+        fs::write(&path, bytes).unwrap();
+        assert!(matches!(
+            VectorDb::load_lvdb(&path),
+            Err(VectorDbError::Corrupt(_))
+        ));
         fs::remove_file(path).unwrap();
     }
 }
