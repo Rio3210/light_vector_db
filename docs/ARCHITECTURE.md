@@ -73,7 +73,7 @@ flowchart TB
 | **Query** | Decide *how* to answer a search: filter strategy, index vs. brute force, scoring, limit. | `search_filtered` routes unfiltered queries to the index; keeps filtered search exact | full planner (§5) |
 | **Index** | Nearest-neighbour lookup behind one trait. | `VectorIndex` trait with `BruteForce` + `AnnIndex`; `VectorDb` holds a `Box<dyn VectorIndex>` chosen via `IndexKind` | per-layer HNSW, persisted index |
 | **Codec** | How a vector is encoded in bytes. | raw `f32` via serde | `f32`, scalar-quantized `int8`, product quantization |
-| **Storage** | The on-disk format, I/O, mmap, durability. | JSON via `save/load_to_path` | binary `.lvdb` format, pager, mmap (§4) |
+| **Storage** | The on-disk format, I/O, mmap, durability. | `.lvdb` binary (versioned, CRC-checked) via `save_to_path`/`load_from_path`; JSON via `export_json`/`import_json` | offset table, mmap, journal (§4) |
 
 **Key refactor:** today `VectorDb` owns everything. We split index behind a
 trait so brute force and HNSW are interchangeable, and split storage so the
@@ -307,9 +307,10 @@ flowchart LR
     dimension, index kind, CRC-32 of header and body) + ids + a contiguous
     fixed-stride vectors block + variable payloads. `VectorDb::save_lvdb` /
     `load_lvdb`. Reads sequentially for now; the offset table + mmap land in M4.
-  - [ ] Slice 4 — demote JSON to `export`/`import`, make `.lvdb` the primary.
+  - [x] Slice 4 — `.lvdb` is now the primary format (`save_to_path` /
+    `load_from_path`); JSON moved to `export_json` / `import_json`.
 
-  *Zero new deps through slice 3.*
+  **Milestone 1 complete.** *Zero new dependencies.*
 - **M2 — the CLI.** `lvdb` with the commands in §7. Makes it demoable and real.
 - **M3 — persist the index.** Serialize the HNSW graph into the index section so
   loading a large database is instant. *The ANN work pays off here.*
