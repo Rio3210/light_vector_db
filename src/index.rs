@@ -19,8 +19,10 @@ use crate::{VectorDbError, cosine_similarity, validate_numbers};
 /// A nearest-neighbour index over `(id, vector)` pairs.
 ///
 /// Implementations must agree on scoring (higher score = more similar) so the
-/// query layer can treat them interchangeably.
-pub trait VectorIndex {
+/// query layer can treat them interchangeably. `Debug` is required so a
+/// [`VectorDb`](crate::VectorDb) holding a `Box<dyn VectorIndex>` stays
+/// printable.
+pub trait VectorIndex: std::fmt::Debug {
     /// Add a vector under `id`. Returns an error for empty, non-finite, or
     /// wrong-dimension vectors.
     fn insert(&mut self, id: u64, vector: Vec<f32>) -> Result<(), VectorDbError>;

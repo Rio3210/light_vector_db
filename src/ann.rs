@@ -30,11 +30,13 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
+use serde::{Deserialize, Serialize};
+
 use crate::index::VectorIndex;
 use crate::{VectorDbError, cosine_similarity, validate_numbers};
 
 /// Tuning parameters for an [`AnnIndex`].
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct AnnParams {
     /// Maximum neighbours retained per node (`M` in HNSW terms).
     pub max_neighbors: usize,
