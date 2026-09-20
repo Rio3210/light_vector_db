@@ -33,8 +33,8 @@
 - [x] Single-file `.lvdb` binary format (versioned, checksummed) + JSON export
 - [x] Input validation (empty / non-finite / dimension mismatch)
 - [x] Benchmarks on realistic vector sizes
+- [x] `lvdb` command-line tool
 - [ ] Memory-mapped reads and an on-disk (persisted) HNSW index
-- [ ] `lvdb` command-line tool
 - [ ] Optional embedding-provider integrations (e.g. a local Ollama helper)
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design and milestone plan.
@@ -99,6 +99,25 @@ Every record and query in one `VectorDb` must have the same dimension and should
 cargo run     # runs the demo in src/main.rs
 cargo test    # runs the test suite
 ```
+
+## Command-line tool (`lvdb`)
+
+The crate ships an `lvdb` binary — one database per file, driven from the
+terminal (in the spirit of the `sqlite3` shell):
+
+```powershell
+cargo run --bin lvdb -- create  notes.lvdb --dim 3 --index hnsw
+cargo run --bin lvdb -- insert  notes.lvdb --id 1 --vector 0.9,0.1,0 --text "the cat sat" --meta topic=animals
+cargo run --bin lvdb -- insert  notes.lvdb --id 2 --vector 0.1,0.1,0.9 --text "rust is fast" --meta topic=rust
+cargo run --bin lvdb -- search  notes.lvdb --vector 0.85,0.15,0.05 -k 3
+cargo run --bin lvdb -- search  notes.lvdb --vector 0.85,0.15,0.05 --filter topic=rust
+cargo run --bin lvdb -- stats   notes.lvdb
+cargo run --bin lvdb -- export  notes.lvdb notes.json   # human-readable copy
+cargo run --bin lvdb -- import  notes.json notes.lvdb
+```
+
+A `--vector` value of the form `@path` is read from a file. Run
+`cargo run --bin lvdb -- help` for the full reference.
 
 ## Benchmarks
 
