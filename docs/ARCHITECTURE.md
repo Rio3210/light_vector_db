@@ -311,7 +311,9 @@ flowchart LR
     `load_from_path`); JSON moved to `export_json` / `import_json`.
 
   **Milestone 1 complete.** *Zero new dependencies.*
-- **M2 — the CLI.** `lvdb` with the commands in §7. Makes it demoable and real.
+- **M2 — the CLI. ✅ Done.** `lvdb` binary (`src/bin/lvdb.rs`) with
+  `create` / `insert` / `search` / `stats` / `export` / `import`, a hand-rolled
+  arg parser (zero deps), and end-to-end tests in `tests/cli.rs`.
 - **M3 — persist the index.** Serialize the HNSW graph into the index section so
   loading a large database is instant. *The ANN work pays off here.*
 - **M4 — mmap.** Zero-copy vector reads; open huge files in small RAM. (`memmap2`.)
