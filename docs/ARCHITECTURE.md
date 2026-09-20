@@ -303,8 +303,11 @@ flowchart LR
   - [x] Slice 2 — `VectorDb` holds a `Box<dyn VectorIndex>` chosen by `IndexKind`;
     unfiltered search routes through it; index maintained on insert/upsert/delete
     and rebuilt on load; `index_kind` persisted in the JSON snapshot.
-  - [ ] Slice 3 — the binary `.lvdb` v1 format (header + vectors + payload sections).
-  - [ ] Slice 4 — demote JSON to `export`/`import`.
+  - [x] Slice 3 — the binary `.lvdb` v1 format: 64-byte header (magic, version,
+    dimension, index kind, CRC-32 of header and body) + ids + a contiguous
+    fixed-stride vectors block + variable payloads. `VectorDb::save_lvdb` /
+    `load_lvdb`. Reads sequentially for now; the offset table + mmap land in M4.
+  - [ ] Slice 4 — demote JSON to `export`/`import`, make `.lvdb` the primary.
 
   *Zero new deps through slice 3.*
 - **M2 — the CLI.** `lvdb` with the commands in §7. Makes it demoable and real.
