@@ -8,6 +8,12 @@ use std::{collections::BTreeMap, error::Error, fmt, fs, path::Path};
 
 use serde::{Deserialize, Serialize};
 
+mod ann;
+mod index;
+
+pub use ann::{AnnIndex, AnnParams};
+pub use index::{BruteForce, VectorIndex};
+
 pub type Metadata = BTreeMap<String, String>;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -179,6 +185,22 @@ impl VectorDb {
                 record: record.clone(),
             })
             .collect())
+    }
+
+    /// Build an approximate nearest-neighbour index from this collection.
+    ///
+    /// The collection keeps exact brute-force [`search`](Self::search) as its
+    /// default; this returns a separate, experimental [`AnnIndex`] for faster
+    /// approximate search over large collections.
+    pub fn build_ann_index(&self, params: AnnParams) -> Result<AnnIndex, VectorDbError> {
+        let mut index = match self.dimension {
+            Some(dimension) => AnnIndex::with_dimension(dimension, params)?,
+            None => AnnIndex::with_params(params),
+        };
+        for record in self.records.values() {
+            index.insert(record.id, record.vector.clone())?;
+        }
+        Ok(index)
     }
 
     pub fn save_to_path(&self, path: impl AsRef<Path>) -> Result<(), VectorDbError> {
