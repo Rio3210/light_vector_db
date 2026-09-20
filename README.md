@@ -18,7 +18,9 @@
 - Cosine-similarity search
 - Insert, upsert, get, and delete operations
 - String metadata and metadata-filtered search
-- JSON persistence for local use (atomic, crash-safe writes)
+- Pluggable search index (exact brute force, or an approximate HNSW/NSW graph)
+- Single-file `.lvdb` binary persistence (atomic, crash-safe) — plus JSON export
+  for inspection and fixtures
 - Validation for empty, non-finite, and mismatched vectors
 
 ## Roadmap
@@ -27,11 +29,15 @@
 - [x] Brute-force cosine-similarity search
 - [x] Insert / upsert / get / delete
 - [x] Metadata + metadata-filtered search
-- [x] JSON persistence with atomic saves
+- [x] Pluggable index behind a `VectorIndex` trait (exact + approximate)
+- [x] Single-file `.lvdb` binary format (versioned, checksummed) + JSON export
 - [x] Input validation (empty / non-finite / dimension mismatch)
-- [ ] Benchmarks on realistic vector sizes
-- [ ] Approximate nearest-neighbour index (HNSW) for large collections
+- [x] Benchmarks on realistic vector sizes
+- [ ] Memory-mapped reads and an on-disk (persisted) HNSW index
+- [ ] `lvdb` command-line tool
 - [ ] Optional embedding-provider integrations (e.g. a local Ollama helper)
+
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design and milestone plan.
 
 ## Use it from another Rust project
 
@@ -67,9 +73,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let hits = notes.search(&[0.85, 0.15, 0.05], 5)?;
     println!("{}", hits[0].record.text);
 
-    notes.save_to_path("data/notes.json")?;
-    let restored = VectorDb::load_from_path("data/notes.json")?;
+    // The whole database is one portable file you can commit and share.
+    notes.save_to_path("data/notes.lvdb")?;
+    let restored = VectorDb::load_from_path("data/notes.lvdb")?;
     assert_eq!(restored.len(), 2);
+
+    // Or export human-readable JSON for inspection / fixtures:
+    notes.export_json("data/notes.json")?;
 
     let mut filter = Metadata::new();
     filter.insert("topic".into(), "rust".into());

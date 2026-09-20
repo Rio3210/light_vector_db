@@ -364,66 +364,75 @@ impl VectorDb {
         Ok(index)
     }
 
-    pub fn save_to_path(&self, path: impl AsRef<Path>) -> Result<(), VectorDbError> {
-        let path = path.as_ref();
-        let parent = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        fs::create_dir_all(parent)?;
-        let snapshot = DbSnapshot {
-            dimension: self.dimension,
-            records: &self.records,
-            index_kind: self.index_kind,
-        };
-        let temporary = path.with_extension("tmp");
-        fs::write(&temporary, serde_json::to_vec_pretty(&snapshot)?)?;
-        // Rename is atomic, so an interrupted save never corrupts the existing file.
-        fs::rename(temporary, path)?;
-        Ok(())
-    }
-
-    pub fn load_from_path(path: impl AsRef<Path>) -> Result<Self, VectorDbError> {
-        let snapshot: OwnedDbSnapshot = serde_json::from_slice(&fs::read(path)?)?;
-        let mut db = Self::empty(None, snapshot.index_kind).expect("no dimension cannot fail");
-        db.dimension = snapshot.dimension;
-        db.records = snapshot.records;
-        db.validate_database()?;
-        db.rebuild_index()?;
-        Ok(db)
-    }
-
-    /// Save the database to a compact, portable `.lvdb` binary file.
+    /// Save the database to its primary format: a compact, portable `.lvdb`
+    /// binary file (conventionally a `.lvdb` extension).
     ///
     /// Written to a temporary file and atomically renamed, so an interrupted
-    /// save never corrupts an existing file. The search index is not stored
-    /// (it is rebuilt on load); only the records and configuration are.
-    pub fn save_lvdb(&self, path: impl AsRef<Path>) -> Result<(), VectorDbError> {
-        let path = path.as_ref();
-        let parent = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        fs::create_dir_all(parent)?;
+    /// save never corrupts an existing file. The search index is derived state
+    /// rebuilt on load, so only the records and configuration are stored.
+    ///
+    /// For a human-readable file, use [`export_json`](Self::export_json).
+    pub fn save_to_path(&self, path: impl AsRef<Path>) -> Result<(), VectorDbError> {
         let bytes = storage::encode(self.dimension, self.index_kind, &self.records);
-        let temporary = path.with_extension("lvdb.tmp");
-        fs::write(&temporary, bytes)?;
-        fs::rename(temporary, path)?;
-        Ok(())
+        Self::atomic_write(path.as_ref(), &bytes)
     }
 
     /// Load a database from a `.lvdb` binary file, rebuilding the search index.
     ///
     /// Returns [`VectorDbError::Corrupt`] for a malformed or truncated file and
     /// [`VectorDbError::UnsupportedVersion`] for a newer major format version.
-    pub fn load_lvdb(path: impl AsRef<Path>) -> Result<Self, VectorDbError> {
+    pub fn load_from_path(path: impl AsRef<Path>) -> Result<Self, VectorDbError> {
         let (dimension, index_kind, records) = storage::decode(&fs::read(path)?)?;
+        Self::from_parts(dimension, index_kind, records)
+    }
+
+    /// Export the database to human-readable JSON.
+    ///
+    /// JSON is portable, diffable, and easy to inspect or hand-edit — ideal for
+    /// test fixtures and version control. Use [`save_to_path`](Self::save_to_path)
+    /// for the compact primary format.
+    pub fn export_json(&self, path: impl AsRef<Path>) -> Result<(), VectorDbError> {
+        let snapshot = DbSnapshot {
+            dimension: self.dimension,
+            records: &self.records,
+            index_kind: self.index_kind,
+        };
+        Self::atomic_write(path.as_ref(), &serde_json::to_vec_pretty(&snapshot)?)
+    }
+
+    /// Import a database from a JSON file written by
+    /// [`export_json`](Self::export_json), rebuilding the search index.
+    pub fn import_json(path: impl AsRef<Path>) -> Result<Self, VectorDbError> {
+        let snapshot: OwnedDbSnapshot = serde_json::from_slice(&fs::read(path)?)?;
+        Self::from_parts(snapshot.dimension, snapshot.index_kind, snapshot.records)
+    }
+
+    /// Reconstruct a database from loaded parts: validate, then rebuild the index.
+    fn from_parts(
+        dimension: Option<usize>,
+        index_kind: IndexKind,
+        records: BTreeMap<u64, Record>,
+    ) -> Result<Self, VectorDbError> {
         let mut db = Self::empty(None, index_kind).expect("no dimension cannot fail");
         db.dimension = dimension;
         db.records = records;
         db.validate_database()?;
         db.rebuild_index()?;
         Ok(db)
+    }
+
+    /// Write `bytes` to `path` via a temporary file and an atomic rename.
+    fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), VectorDbError> {
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent)?;
+        let temporary = path.with_extension("tmp");
+        fs::write(&temporary, bytes)?;
+        // Rename is atomic, so an interrupted save never corrupts the existing file.
+        fs::rename(temporary, path)?;
+        Ok(())
     }
 
     fn validate_vector(&mut self, vector: &[f32]) -> Result<(), VectorDbError> {
@@ -551,27 +560,9 @@ mod tests {
         assert!(matches!(db.delete(1), Err(VectorDbError::NotFound(1))));
     }
 
-    #[test]
-    fn persistence_round_trip() {
-        let path = std::env::temp_dir().join(format!(
-            "light-vector-db-{}.json",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let mut db = VectorDb::with_dimension(2).unwrap();
-        db.insert(record(7, vec![0.4, 0.8]).with_metadata("source", "test"))
-            .unwrap();
-        db.save_to_path(&path).unwrap();
-        let loaded = VectorDb::load_from_path(&path).unwrap();
-        assert_eq!(loaded.get(7).unwrap().metadata["source"], "test");
-        fs::remove_file(path).unwrap();
-    }
-
-    fn temp_path(tag: &str) -> std::path::PathBuf {
+    fn temp_path(tag: &str, ext: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
-            "light-vector-db-{tag}-{}.json",
+            "light-vector-db-{tag}-{}.{ext}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -619,30 +610,16 @@ mod tests {
     }
 
     #[test]
-    fn hnsw_index_kind_survives_round_trip() {
-        let path = temp_path("hnsw");
-        let mut db = VectorDb::with_index(3, IndexKind::Hnsw(AnnParams::default())).unwrap();
-        db.insert(record(1, vec![1.0, 0.0, 0.0])).unwrap();
-        db.insert(record(2, vec![0.0, 0.0, 1.0])).unwrap();
-        db.save_to_path(&path).unwrap();
-
-        let loaded = VectorDb::load_from_path(&path).unwrap();
-        assert_eq!(loaded.index_kind(), IndexKind::Hnsw(AnnParams::default()));
-        assert_eq!(loaded.search(&[0.9, 0.0, 0.1], 1).unwrap()[0].record.id, 1);
-        fs::remove_file(path).unwrap();
-    }
-
-    #[test]
-    fn lvdb_binary_round_trip() {
-        let path = temp_path("bin");
+    fn binary_round_trip() {
+        let path = temp_path("bin", "lvdb");
         let mut db = VectorDb::with_index(3, IndexKind::Hnsw(AnnParams::default())).unwrap();
         db.insert(record(1, vec![1.0, 0.0, 0.0]).with_metadata("topic", "rust"))
             .unwrap();
         db.insert(record(2, vec![0.0, 0.0, 1.0]).with_metadata("topic", "db"))
             .unwrap();
-        db.save_lvdb(&path).unwrap();
+        db.save_to_path(&path).unwrap();
 
-        let loaded = VectorDb::load_lvdb(&path).unwrap();
+        let loaded = VectorDb::load_from_path(&path).unwrap();
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded.dimension(), Some(3));
         assert_eq!(loaded.index_kind(), IndexKind::Hnsw(AnnParams::default()));
@@ -654,19 +631,36 @@ mod tests {
     }
 
     #[test]
-    fn lvdb_rejects_corrupt_file() {
-        let path = temp_path("corrupt");
+    fn binary_rejects_corrupt_file() {
+        let path = temp_path("corrupt", "lvdb");
         let mut db = VectorDb::with_dimension(2).unwrap();
         db.insert(record(1, vec![1.0, 0.0])).unwrap();
-        db.save_lvdb(&path).unwrap();
+        db.save_to_path(&path).unwrap();
 
         let mut bytes = fs::read(&path).unwrap();
         bytes[0] = b'X'; // clobber the magic
         fs::write(&path, bytes).unwrap();
         assert!(matches!(
-            VectorDb::load_lvdb(&path),
+            VectorDb::load_from_path(&path),
             Err(VectorDbError::Corrupt(_))
         ));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn json_export_import_round_trip() {
+        let path = temp_path("json", "json");
+        let mut db = VectorDb::with_index(2, IndexKind::Hnsw(AnnParams::default())).unwrap();
+        db.insert(record(1, vec![1.0, 0.0]).with_metadata("topic", "rust"))
+            .unwrap();
+        db.insert(record(2, vec![0.0, 1.0])).unwrap();
+        db.export_json(&path).unwrap();
+
+        let loaded = VectorDb::import_json(&path).unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded.index_kind(), IndexKind::Hnsw(AnnParams::default()));
+        assert_eq!(loaded.get(1).unwrap().metadata["topic"], "rust");
+        assert_eq!(loaded.search(&[1.0, 0.0], 1).unwrap()[0].record.id, 1);
         fs::remove_file(path).unwrap();
     }
 }
