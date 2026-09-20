@@ -212,31 +212,39 @@ The rules of thumb (thresholds are tunable and benchmark-driven):
 
 ## 6. Module layout
 
+A module is a file until it earns a folder; `(planned)` entries below don't
+exist yet — they're added when the milestone that needs them lands, and paths
+like `crate::index::BruteForce` don't change when a file becomes a folder.
+
 ```
 src/
-  lib.rs            # re-exports, crate docs, public API surface
+  lib.rs            # thin module root: declarations + public re-exports
   error.rs          # VectorDbError
-  record.rs         # Record, Metadata, SearchResult
-  db.rs             # VectorDb / Collection: orchestration
-  query/
-    mod.rs          # planner: strategy selection
-    scan.rs         # scoring, top-k selection
+  record.rs         # Record, Metadata, SearchResult, vector validation
+  distance.rs       # cosine_similarity (+ future metrics)
+  db.rs             # VectorDb: records + index + query + persistence
   index/
     mod.rs          # trait VectorIndex
     brute_force.rs  # exact linear scan
-    hnsw.rs         # from today's src/ann.rs (NSW → HNSW)
+    hnsw.rs         # the NSW graph (→ HNSW hierarchy in M3)
   storage/
-    mod.rs
-    format.rs       # header + section layout, versioning, crc
-    pager.rs        # file I/O, mmap, atomic write, freelist
-    codec.rs        # vector encoding on disk
-  quantize.rs       # scalar + product quantization
+    mod.rs          # re-exports the codec
+    format.rs       # .lvdb header + sections, versioning, CRC
+    pager.rs        # (planned, M4) file I/O, mmap, freelist
+    codec.rs        # (planned, M6) vector encoding / quantization
+  query/            # (planned) extracted from db.rs when the planner grows
+  quantize.rs       # (planned, M6) scalar + product quantization
+  main.rs           # the demo (`cargo run`)
   bin/
-    lvdb.rs         # the CLI
-benches/            # insert / search benchmarks (existing scaffold)
-tests/              # integration tests (existing validation.rs)
+    lvdb.rs         # the CLI (`cargo run --bin lvdb`)
+benches/            # insert / search benchmarks
+tests/              # integration tests: validation.rs, cli.rs
 docs/               # this file + the ANN/HNSW guide
 ```
+
+Today the query planner (strategy selection in §5) lives inline in
+`db::VectorDb::search_filtered`; it moves to a `query/` module once it grows
+beyond the current filtered/unfiltered split.
 
 ---
 
