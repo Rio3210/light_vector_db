@@ -70,8 +70,8 @@ flowchart TB
 | Layer | Responsibility | Today | Planned |
 |---|---|---|---|
 | **API** | Public, stable surface apps call. | `VectorDb`, `Record`, `SearchResult`, `VectorDbError` | `Collection`, streaming iterators |
-| **Query** | Decide *how* to answer a search: filter strategy, index vs. brute force, scoring, limit. | inline in `search_filtered` | a small planner (§5) |
-| **Index** | Nearest-neighbour lookup behind one trait. | `AnnIndex` (NSW graph) + implicit brute force | `VectorIndex` trait: `BruteForce`, `Hnsw` |
+| **Query** | Decide *how* to answer a search: filter strategy, index vs. brute force, scoring, limit. | `search_filtered` routes unfiltered queries to the index; keeps filtered search exact | full planner (§5) |
+| **Index** | Nearest-neighbour lookup behind one trait. | `VectorIndex` trait with `BruteForce` + `AnnIndex`; `VectorDb` holds a `Box<dyn VectorIndex>` chosen via `IndexKind` | per-layer HNSW, persisted index |
 | **Codec** | How a vector is encoded in bytes. | raw `f32` via serde | `f32`, scalar-quantized `int8`, product quantization |
 | **Storage** | The on-disk format, I/O, mmap, durability. | JSON via `save/load_to_path` | binary `.lvdb` format, pager, mmap (§4) |
 
@@ -298,9 +298,15 @@ flowchart LR
 - **M0 — foundations (have / in progress).** In-memory brute force, JSON
   persistence with atomic writes, validation, the NSW index first slice, and a
   benchmark scaffold.
-- **M1 — the file format.** Design and implement `.lvdb` v1 (header + vectors +
-  payload sections) with read/write; introduce the `VectorIndex` trait and move
-  brute force + HNSW behind it; demote JSON to export/import. *Zero new deps.*
+- **M1 — the index seam + the file format.** Delivered in slices:
+  - [x] Slice 1 — `VectorIndex` trait; `BruteForce` + `AnnIndex` behind it.
+  - [x] Slice 2 — `VectorDb` holds a `Box<dyn VectorIndex>` chosen by `IndexKind`;
+    unfiltered search routes through it; index maintained on insert/upsert/delete
+    and rebuilt on load; `index_kind` persisted in the JSON snapshot.
+  - [ ] Slice 3 — the binary `.lvdb` v1 format (header + vectors + payload sections).
+  - [ ] Slice 4 — demote JSON to `export`/`import`.
+
+  *Zero new deps through slice 3.*
 - **M2 — the CLI.** `lvdb` with the commands in §7. Makes it demoable and real.
 - **M3 — persist the index.** Serialize the HNSW graph into the index section so
   loading a large database is instant. *The ANN work pays off here.*
