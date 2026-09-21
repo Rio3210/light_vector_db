@@ -71,7 +71,7 @@ flowchart TB
 |---|---|---|---|
 | **API** | Public, stable surface apps call. | `VectorDb`, `Record`, `SearchResult`, `VectorDbError` | `Collection`, streaming iterators |
 | **Query** | Decide *how* to answer a search: filter strategy, index vs. brute force, scoring, limit. | `search_filtered` routes unfiltered queries to the index; keeps filtered search exact | full planner (§5) |
-| **Index** | Nearest-neighbour lookup behind one trait. | `VectorIndex` trait with `BruteForce` + `AnnIndex`; `VectorDb` holds a `Box<dyn VectorIndex>` chosen via `IndexKind` | per-layer HNSW, persisted index |
+| **Index** | Nearest-neighbour lookup behind one trait. | crate-internal `VectorIndex` trait with `BruteForce` + `AnnIndex`; `VectorDb` holds a `Box<dyn VectorIndex>` chosen via `IndexKind`; graph persisted in the file | per-layer HNSW hierarchy |
 | **Codec** | How a vector is encoded in bytes. | raw `f32` via serde | `f32`, scalar-quantized `int8`, product quantization |
 | **Storage** | The on-disk format, I/O, mmap, durability. | `.lvdb` binary (versioned, CRC-checked) via `save_to_path`/`load_from_path`; JSON via `export_json`/`import_json` | offset table, mmap, journal (§4) |
 
@@ -322,8 +322,11 @@ flowchart LR
 - **M2 — the CLI. ✅ Done.** `lvdb` binary (`src/bin/lvdb.rs`) with
   `create` / `insert` / `search` / `stats` / `export` / `import`, a hand-rolled
   arg parser (zero deps), and end-to-end tests in `tests/cli.rs`.
-- **M3 — persist the index.** Serialize the HNSW graph into the index section so
-  loading a large database is instant. *The ANN work pays off here.*
+- **M3 — persist the index. ✅ Done.** The graph (node ids + adjacency + entry)
+  is written to an optional index section of the `.lvdb` file (format v1.1,
+  backward compatible) and reconstructed on load instead of rebuilt — with
+  bounds-checked validation so a tampered file can't cause an out-of-bounds
+  read. Exact indexes and JSON still rebuild.
 - **M4 — mmap.** Zero-copy vector reads; open huge files in small RAM. (`memmap2`.)
 - **M5 — mutability at scale.** Tombstoned deletes, `compact`, and a journal for
   safe in-place writes.

@@ -23,7 +23,6 @@ pub use db::{IndexKind, VectorDb};
 pub use distance::cosine_similarity;
 pub use error::VectorDbError;
 pub use index::hnsw::{AnnIndex, AnnParams};
-pub use index::{BruteForce, VectorIndex};
 pub use record::{Metadata, Record, SearchResult};
 
 // Crate-internal helper, reachable as `crate::validate_numbers` from submodules.

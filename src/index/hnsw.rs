@@ -7,11 +7,11 @@
 //! hierarchy on top of exactly this structure, so the search and neighbour
 //! selection routines here are the foundation the hierarchy will reuse.
 //!
-//! Following the index-layer contract (see [`crate::index`]), the index stores
-//! only **ids and vectors** — never payloads. It implements
-//! [`VectorIndex`](crate::VectorIndex), so it is interchangeable with
-//! [`BruteForce`](crate::BruteForce), and [`VectorDb`](crate::VectorDb)
-//! resolves the ids it returns back into full records.
+//! Following the index-layer contract, the index stores only **ids and
+//! vectors** — never payloads. It implements the crate's `VectorIndex` trait,
+//! so it is interchangeable with the exact `BruteForce` index, and
+//! [`VectorDb`](crate::VectorDb) resolves the ids it returns back into full
+//! records.
 //!
 //! Results are approximate: with the default parameters recall is high but not
 //! guaranteed to match brute force. Raise [`AnnParams::ef_search`] to trade
@@ -28,12 +28,12 @@
 //! ```
 
 use std::cmp::Reverse;
-use std::collections::BinaryHeap;
+use std::collections::{BTreeMap, BinaryHeap};
 
 use serde::{Deserialize, Serialize};
 
-use crate::index::VectorIndex;
-use crate::{VectorDbError, cosine_similarity, validate_numbers};
+use crate::index::{IndexData, VectorIndex};
+use crate::{Record, VectorDbError, cosine_similarity, validate_numbers};
 
 /// Tuning parameters for an [`AnnIndex`].
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -315,6 +315,63 @@ impl AnnIndex {
         }
         Ok(())
     }
+
+    /// Reconstruct an index directly from a persisted [`IndexData`] snapshot and
+    /// the records holding the vectors — no re-insertion, so loading is O(n).
+    ///
+    /// Validates that every referenced id exists and that all neighbour and
+    /// entry indices are in range, returning [`VectorDbError::Corrupt`]
+    /// otherwise (so a tampered file can never cause an out-of-bounds access
+    /// during search).
+    pub(crate) fn from_persisted(
+        dimension: Option<usize>,
+        params: AnnParams,
+        data: IndexData,
+        records: &BTreeMap<u64, Record>,
+    ) -> Result<Self, VectorDbError> {
+        let node_count = data.node_ids.len();
+        if data.neighbors.len() != node_count {
+            return Err(VectorDbError::Corrupt(
+                "persisted index node/neighbour count mismatch",
+            ));
+        }
+        let mut nodes = Vec::with_capacity(node_count);
+        for &id in &data.node_ids {
+            let record = records.get(&id).ok_or(VectorDbError::Corrupt(
+                "persisted index references unknown id",
+            ))?;
+            nodes.push(Node {
+                id,
+                vector: record.vector.clone(),
+            });
+        }
+        let mut neighbors = Vec::with_capacity(node_count);
+        for adjacency in data.neighbors {
+            let mut list = Vec::with_capacity(adjacency.len());
+            for neighbor in adjacency {
+                let neighbor = neighbor as usize;
+                if neighbor >= node_count {
+                    return Err(VectorDbError::Corrupt(
+                        "persisted index neighbour out of range",
+                    ));
+                }
+                list.push(neighbor);
+            }
+            neighbors.push(list);
+        }
+        let entry = match data.entry {
+            Some(entry) if (entry as usize) < node_count => Some(entry as usize),
+            Some(_) => return Err(VectorDbError::Corrupt("persisted index entry out of range")),
+            None => None,
+        };
+        Ok(Self {
+            dimension,
+            params,
+            nodes,
+            neighbors,
+            entry,
+        })
+    }
 }
 
 impl VectorIndex for AnnIndex {
@@ -326,14 +383,62 @@ impl VectorIndex for AnnIndex {
         self.search_with_ef(query, k, ef)
     }
 
-    fn len(&self) -> usize {
-        AnnIndex::len(self)
+    fn persist(&self) -> Option<IndexData> {
+        Some(IndexData {
+            node_ids: self.nodes.iter().map(|node| node.id).collect(),
+            neighbors: self
+                .neighbors
+                .iter()
+                .map(|adjacency| adjacency.iter().map(|&index| index as u32).collect())
+                .collect(),
+            entry: self.entry.map(|entry| entry as u32),
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn from_persisted_validates_indices() {
+        let mut records = BTreeMap::new();
+        records.insert(1u64, Record::new(1, vec![1.0, 0.0], "a"));
+        let params = AnnParams::default();
+
+        // Node references an id that isn't in the records.
+        let data = IndexData {
+            node_ids: vec![2],
+            neighbors: vec![vec![]],
+            entry: Some(0),
+        };
+        assert!(matches!(
+            AnnIndex::from_persisted(Some(2), params, data, &records),
+            Err(VectorDbError::Corrupt(_))
+        ));
+
+        // Neighbour index is out of range.
+        let data = IndexData {
+            node_ids: vec![1],
+            neighbors: vec![vec![5]],
+            entry: Some(0),
+        };
+        assert!(matches!(
+            AnnIndex::from_persisted(Some(2), params, data, &records),
+            Err(VectorDbError::Corrupt(_))
+        ));
+
+        // Entry index is out of range.
+        let data = IndexData {
+            node_ids: vec![1],
+            neighbors: vec![vec![]],
+            entry: Some(3),
+        };
+        assert!(matches!(
+            AnnIndex::from_persisted(Some(2), params, data, &records),
+            Err(VectorDbError::Corrupt(_))
+        ));
+    }
 
     /// Deterministic pseudo-random vector generator (splitmix64), no rng dep.
     fn sample_vector(seed: u64, dimension: usize) -> Vec<f32> {
