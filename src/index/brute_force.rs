@@ -32,11 +32,6 @@ impl BruteForce {
         })
     }
 
-    /// The fixed vector dimension, once known.
-    pub fn dimension(&self) -> Option<usize> {
-        self.dimension
-    }
-
     fn check_dimension(&mut self, vector: &[f32]) -> Result<(), VectorDbError> {
         validate_numbers(vector)?;
         match self.dimension {
@@ -92,10 +87,6 @@ impl VectorIndex for BruteForce {
         scored.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
         scored.truncate(k);
         Ok(scored)
-    }
-
-    fn len(&self) -> usize {
-        self.entries.len()
     }
 }
 

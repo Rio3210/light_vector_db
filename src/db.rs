@@ -7,7 +7,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::index::hnsw::AnnIndex;
-use crate::index::{BruteForce, VectorIndex};
+use crate::index::{BruteForce, IndexData, VectorIndex};
 use crate::storage;
 use crate::{
     AnnParams, Metadata, Record, SearchResult, VectorDbError, cosine_similarity, validate_numbers,
@@ -275,7 +275,15 @@ impl VectorDb {
     ///
     /// For a human-readable file, use [`export_json`](Self::export_json).
     pub fn save_to_path(&self, path: impl AsRef<Path>) -> Result<(), VectorDbError> {
-        let bytes = storage::encode(self.dimension, self.index_kind, &self.records);
+        // A graph index persists its structure so loading needn't rebuild it;
+        // an exact index has nothing to store (`persist` returns None).
+        let index = self.index.persist();
+        let bytes = storage::encode(
+            self.dimension,
+            self.index_kind,
+            &self.records,
+            index.as_ref(),
+        );
         Self::atomic_write(path.as_ref(), &bytes)
     }
 
@@ -284,8 +292,8 @@ impl VectorDb {
     /// Returns [`VectorDbError::Corrupt`] for a malformed or truncated file and
     /// [`VectorDbError::UnsupportedVersion`] for a newer major format version.
     pub fn load_from_path(path: impl AsRef<Path>) -> Result<Self, VectorDbError> {
-        let (dimension, index_kind, records) = storage::decode(&fs::read(path)?)?;
-        Self::from_parts(dimension, index_kind, records)
+        let (dimension, index_kind, records, index_data) = storage::decode(&fs::read(path)?)?;
+        Self::from_parts(dimension, index_kind, records, index_data)
     }
 
     /// Export the database to human-readable JSON.
@@ -306,20 +314,40 @@ impl VectorDb {
     /// [`export_json`](Self::export_json), rebuilding the search index.
     pub fn import_json(path: impl AsRef<Path>) -> Result<Self, VectorDbError> {
         let snapshot: OwnedDbSnapshot = serde_json::from_slice(&fs::read(path)?)?;
-        Self::from_parts(snapshot.dimension, snapshot.index_kind, snapshot.records)
+        // JSON carries no graph, so the index is rebuilt from the records.
+        Self::from_parts(
+            snapshot.dimension,
+            snapshot.index_kind,
+            snapshot.records,
+            None,
+        )
     }
 
-    /// Reconstruct a database from loaded parts: validate, then rebuild the index.
+    /// Reconstruct a database from loaded parts: validate, then restore the
+    /// index — reusing a persisted graph when present, otherwise rebuilding.
     fn from_parts(
         dimension: Option<usize>,
         index_kind: IndexKind,
         records: BTreeMap<u64, Record>,
+        index_data: Option<IndexData>,
     ) -> Result<Self, VectorDbError> {
         let mut db = Self::empty(None, index_kind).expect("no dimension cannot fail");
         db.dimension = dimension;
         db.records = records;
         db.validate_database()?;
-        db.rebuild_index()?;
+        match (index_kind, index_data) {
+            // A persisted graph is reconstructed directly — no rebuild.
+            (IndexKind::Hnsw(params), Some(data)) => {
+                db.index = Box::new(AnnIndex::from_persisted(
+                    db.dimension,
+                    params,
+                    data,
+                    &db.records,
+                )?);
+            }
+            // Exact index, JSON, or an older file without a graph: rebuild.
+            _ => db.rebuild_index()?,
+        }
         Ok(db)
     }
 
@@ -520,6 +548,49 @@ mod tests {
             VectorDb::load_from_path(&path),
             Err(VectorDbError::Corrupt(_))
         ));
+        fs::remove_file(path).unwrap();
+    }
+
+    /// Deterministic pseudo-random vector generator (splitmix64), no rng dep.
+    fn sample_vector(seed: u64, dimension: usize) -> Vec<f32> {
+        let mut state = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        (0..dimension)
+            .map(|_| {
+                state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = state;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^= z >> 31;
+                (z >> 40) as f32 / (1u32 << 24) as f32 * 2.0 - 1.0
+            })
+            .collect()
+    }
+
+    #[test]
+    fn persisted_hnsw_index_matches_live_search() {
+        let dimension = 8;
+        let mut db =
+            VectorDb::with_index(dimension, IndexKind::Hnsw(AnnParams::default())).unwrap();
+        // Insert in a shuffled id order so node order differs from id order,
+        // making a faithful graph round-trip meaningful.
+        for id in [5u64, 1, 9, 3, 7, 2, 8, 0, 6, 4] {
+            db.insert(record(id, sample_vector(id, dimension))).unwrap();
+        }
+        let query = sample_vector(100, dimension);
+        let before = db.search(&query, 5).unwrap();
+
+        let path = temp_path("persist", "lvdb");
+        db.save_to_path(&path).unwrap();
+        let loaded = VectorDb::load_from_path(&path).unwrap();
+        let after = loaded.search(&query, 5).unwrap();
+
+        // The reloaded graph must produce identical results (it was restored,
+        // not rebuilt from scratch).
+        assert_eq!(before.len(), after.len());
+        for (b, a) in before.iter().zip(&after) {
+            assert_eq!(b.record.id, a.record.id);
+            assert!((b.score - a.score).abs() < 1e-6);
+        }
         fs::remove_file(path).unwrap();
     }
 

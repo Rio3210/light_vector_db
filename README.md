@@ -34,7 +34,9 @@
 - [x] Input validation (empty / non-finite / dimension mismatch)
 - [x] Benchmarks on realistic vector sizes
 - [x] `lvdb` command-line tool
-- [ ] Memory-mapped reads and an on-disk (persisted) HNSW index
+- [x] On-disk (persisted) index — the graph is stored in the `.lvdb` file, so
+  loading never rebuilds it
+- [ ] Memory-mapped reads for large files
 - [ ] Optional embedding-provider integrations (e.g. a local Ollama helper)
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design and milestone plan.

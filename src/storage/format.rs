@@ -21,19 +21,29 @@
 
 use std::collections::BTreeMap;
 
+use crate::index::IndexData;
 use crate::{IndexKind, Metadata, Record, VectorDbError};
 
-/// The database state carried in a `.lvdb` file: dimension, index kind, records.
-type DecodedDb = (Option<usize>, IndexKind, BTreeMap<u64, Record>);
+/// The database state carried in a `.lvdb` file: dimension, index kind, records,
+/// and an optional persisted graph index.
+type DecodedDb = (
+    Option<usize>,
+    IndexKind,
+    BTreeMap<u64, Record>,
+    Option<IndexData>,
+);
 
 const MAGIC: &[u8; 4] = b"LVDB";
 const VERSION_MAJOR: u16 = 1;
-const VERSION_MINOR: u16 = 0;
+// Minor 1 added the optional persisted index section (backward compatible: a
+// minor-0 reader ignores it and rebuilds the index instead).
+const VERSION_MINOR: u16 = 1;
 const HEADER_LEN: usize = 64;
 /// The header CRC covers everything before it: bytes `[0, HEADER_CRC_OFFSET)`.
 const HEADER_CRC_OFFSET: usize = 60;
 
 const FLAG_DIMENSION_PRESENT: u32 = 1;
+const FLAG_HAS_INDEX: u32 = 2;
 
 const METRIC_COSINE: u8 = 0;
 const ENCODING_F32LE: u8 = 0;
@@ -45,6 +55,7 @@ pub(crate) fn encode(
     dimension: Option<usize>,
     index_kind: IndexKind,
     records: &BTreeMap<u64, Record>,
+    index: Option<&IndexData>,
 ) -> Vec<u8> {
     // The vector stride: the fixed dimension, or the first record's length when
     // the dimension is not yet fixed but records exist.
@@ -70,6 +81,23 @@ pub(crate) fn encode(
         }
     }
 
+    // Optional index section: the graph's structure (node ids + adjacency +
+    // entry). Vectors are not repeated here — they come from the records above.
+    if let Some(index) = index {
+        body.push(u8::from(index.entry.is_some()));
+        body.extend_from_slice(&index.entry.unwrap_or(0).to_le_bytes());
+        body.extend_from_slice(&(index.node_ids.len() as u32).to_le_bytes());
+        for id in &index.node_ids {
+            body.extend_from_slice(&id.to_le_bytes());
+        }
+        for adjacency in &index.neighbors {
+            body.extend_from_slice(&(adjacency.len() as u32).to_le_bytes());
+            for neighbor in adjacency {
+                body.extend_from_slice(&neighbor.to_le_bytes());
+            }
+        }
+    }
+
     let (index_tag, params) = match index_kind {
         IndexKind::Exact => (INDEX_TAG_EXACT, None),
         IndexKind::Hnsw(params) => (INDEX_TAG_HNSW, Some(params)),
@@ -79,11 +107,13 @@ pub(crate) fn encode(
     header[0..4].copy_from_slice(MAGIC);
     header[4..6].copy_from_slice(&VERSION_MAJOR.to_le_bytes());
     header[6..8].copy_from_slice(&VERSION_MINOR.to_le_bytes());
-    let flags = if dimension.is_some() {
-        FLAG_DIMENSION_PRESENT
-    } else {
-        0
-    };
+    let mut flags = 0u32;
+    if dimension.is_some() {
+        flags |= FLAG_DIMENSION_PRESENT;
+    }
+    if index.is_some() {
+        flags |= FLAG_HAS_INDEX;
+    }
     header[8..12].copy_from_slice(&flags.to_le_bytes());
     header[12..16].copy_from_slice(&(dimension.unwrap_or(0) as u32).to_le_bytes());
     header[16] = METRIC_COSINE;
@@ -190,7 +220,34 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<DecodedDb, VectorDbError> {
         );
     }
 
-    Ok((dimension, index_kind, records))
+    let index_data = if flags & FLAG_HAS_INDEX != 0 {
+        let has_entry = reader.u8()? != 0;
+        let entry_raw = reader.u32()?;
+        let entry = has_entry.then_some(entry_raw);
+        let node_count = reader.u32()? as usize;
+        let mut node_ids = Vec::new();
+        for _ in 0..node_count {
+            node_ids.push(reader.u64()?);
+        }
+        let mut neighbors = Vec::new();
+        for _ in 0..node_count {
+            let neighbor_count = reader.u32()? as usize;
+            let mut adjacency = Vec::new();
+            for _ in 0..neighbor_count {
+                adjacency.push(reader.u32()?);
+            }
+            neighbors.push(adjacency);
+        }
+        Some(IndexData {
+            node_ids,
+            neighbors,
+            entry,
+        })
+    } else {
+        None
+    };
+
+    Ok((dimension, index_kind, records, index_data))
 }
 
 /// Append a length-prefixed UTF-8 string to `buf`.
@@ -221,6 +278,10 @@ impl<'a> Reader<'a> {
         let slice = &self.buf[self.pos..end];
         self.pos = end;
         Ok(slice)
+    }
+
+    fn u8(&mut self) -> Result<u8, VectorDbError> {
+        Ok(self.take(1)?[0])
     }
 
     fn u32(&mut self) -> Result<u32, VectorDbError> {
@@ -281,11 +342,12 @@ mod tests {
     #[test]
     fn round_trip_exact() {
         let records = sample();
-        let bytes = encode(Some(2), IndexKind::Exact, &records);
-        let (dim, kind, decoded) = decode(&bytes).unwrap();
+        let bytes = encode(Some(2), IndexKind::Exact, &records, None);
+        let (dim, kind, decoded, index) = decode(&bytes).unwrap();
         assert_eq!(dim, Some(2));
         assert_eq!(kind, IndexKind::Exact);
         assert_eq!(decoded, records);
+        assert!(index.is_none());
     }
 
     #[test]
@@ -296,16 +358,35 @@ mod tests {
             ef_construction: 48,
             ef_search: 24,
         };
-        let bytes = encode(Some(2), IndexKind::Hnsw(params), &records);
-        let (_, kind, _) = decode(&bytes).unwrap();
+        let bytes = encode(Some(2), IndexKind::Hnsw(params), &records, None);
+        let (_, kind, _, _) = decode(&bytes).unwrap();
         assert_eq!(kind, IndexKind::Hnsw(params));
+    }
+
+    #[test]
+    fn round_trip_index_section() {
+        let records = sample();
+        let index = IndexData {
+            node_ids: vec![2, 1],
+            neighbors: vec![vec![1], vec![0]],
+            entry: Some(0),
+        };
+        let bytes = encode(
+            Some(2),
+            IndexKind::Hnsw(AnnParams::default()),
+            &records,
+            Some(&index),
+        );
+        let (_, _, decoded, decoded_index) = decode(&bytes).unwrap();
+        assert_eq!(decoded, records);
+        assert_eq!(decoded_index, Some(index));
     }
 
     #[test]
     fn round_trip_empty() {
         let records = BTreeMap::new();
-        let bytes = encode(None, IndexKind::Exact, &records);
-        let (dim, kind, decoded) = decode(&bytes).unwrap();
+        let bytes = encode(None, IndexKind::Exact, &records, None);
+        let (dim, kind, decoded, _) = decode(&bytes).unwrap();
         assert_eq!(dim, None);
         assert_eq!(kind, IndexKind::Exact);
         assert!(decoded.is_empty());
@@ -313,21 +394,21 @@ mod tests {
 
     #[test]
     fn rejects_bad_magic() {
-        let mut bytes = encode(Some(2), IndexKind::Exact, &sample());
+        let mut bytes = encode(Some(2), IndexKind::Exact, &sample(), None);
         bytes[0] = b'X';
         assert!(matches!(decode(&bytes), Err(VectorDbError::Corrupt(_))));
     }
 
     #[test]
     fn rejects_truncation() {
-        let bytes = encode(Some(2), IndexKind::Exact, &sample());
+        let bytes = encode(Some(2), IndexKind::Exact, &sample(), None);
         let truncated = &bytes[..bytes.len() - 3];
         assert!(matches!(decode(truncated), Err(VectorDbError::Corrupt(_))));
     }
 
     #[test]
     fn rejects_body_corruption() {
-        let mut bytes = encode(Some(2), IndexKind::Exact, &sample());
+        let mut bytes = encode(Some(2), IndexKind::Exact, &sample(), None);
         let last = bytes.len() - 1;
         bytes[last] ^= 0xFF;
         assert!(matches!(decode(&bytes), Err(VectorDbError::Corrupt(_))));
@@ -335,7 +416,7 @@ mod tests {
 
     #[test]
     fn rejects_future_major_version() {
-        let mut bytes = encode(Some(2), IndexKind::Exact, &sample());
+        let mut bytes = encode(Some(2), IndexKind::Exact, &sample(), None);
         // Bump the major version and repair the header CRC so only the version
         // check can reject it.
         bytes[4..6].copy_from_slice(&2u16.to_le_bytes());
@@ -343,7 +424,7 @@ mod tests {
         bytes[HEADER_CRC_OFFSET..HEADER_LEN].copy_from_slice(&header_crc.to_le_bytes());
         assert!(matches!(
             decode(&bytes),
-            Err(VectorDbError::UnsupportedVersion { major: 2, minor: 0 })
+            Err(VectorDbError::UnsupportedVersion { major: 2, .. })
         ));
     }
 }
