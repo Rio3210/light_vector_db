@@ -27,6 +27,21 @@ pub enum IndexKind {
     Hnsw(AnnParams),
 }
 
+/// How vectors are encoded in the `.lvdb` file.
+///
+/// This is a storage concern only: vectors are always `f32` in memory. A
+/// quantized file is smaller on disk and dequantized back to `f32` on load
+/// (lossily). JSON export is always `Float32`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub enum Encoding {
+    /// Full-precision little-endian `f32` (4 bytes per component).
+    #[default]
+    Float32,
+    /// Scalar quantization: each component stored as one byte against a global
+    /// min/max range. 4× smaller, with a small, bounded precision loss.
+    ScalarU8,
+}
+
 /// A local-first collection of vectors with metadata and similarity search.
 ///
 /// Records (the payloads) are the source of truth; the [`VectorIndex`] holds
@@ -41,6 +56,8 @@ pub struct VectorDb {
     /// Ids deleted since the last rebuild. Their nodes still sit in `index`
     /// (search skips them); `compact` reclaims them. Empty after any rebuild.
     tombstones: BTreeSet<u64>,
+    /// How vectors are written to the `.lvdb` file (in-memory is always `f32`).
+    encoding: Encoding,
 }
 
 /// Borrowed view of a [`VectorDb`] for serialization (no clone of records).
@@ -73,6 +90,7 @@ impl Clone for VectorDb {
         let mut cloned = Self::empty(None, self.index_kind).expect("no dimension cannot fail");
         cloned.dimension = self.dimension;
         cloned.records = self.records.clone();
+        cloned.encoding = self.encoding;
         cloned
             .rebuild_index()
             .expect("existing records are already valid");
@@ -133,7 +151,19 @@ impl VectorDb {
             index_kind,
             index: new_index(index_kind, dimension)?,
             tombstones: BTreeSet::new(),
+            encoding: Encoding::default(),
         })
+    }
+
+    /// The on-disk vector encoding for this database.
+    pub fn encoding(&self) -> Encoding {
+        self.encoding
+    }
+
+    /// Choose how vectors are written to the `.lvdb` file. In-memory vectors
+    /// stay `f32`; this only affects [`save_to_path`](Self::save_to_path).
+    pub fn set_encoding(&mut self, encoding: Encoding) {
+        self.encoding = encoding;
     }
 
     pub fn dimension(&self) -> Option<usize> {
@@ -323,6 +353,7 @@ impl VectorDb {
         let bytes = storage::encode(
             self.dimension,
             self.index_kind,
+            self.encoding,
             &self.records,
             index.as_ref(),
         );
@@ -334,8 +365,9 @@ impl VectorDb {
     /// Returns [`VectorDbError::Corrupt`] for a malformed or truncated file and
     /// [`VectorDbError::UnsupportedVersion`] for a newer major format version.
     pub fn load_from_path(path: impl AsRef<Path>) -> Result<Self, VectorDbError> {
-        let (dimension, index_kind, records, index_data) = storage::decode(&fs::read(path)?)?;
-        Self::from_parts(dimension, index_kind, records, index_data)
+        let (dimension, index_kind, encoding, records, index_data) =
+            storage::decode(&fs::read(path)?)?;
+        Self::from_parts(dimension, index_kind, encoding, records, index_data)
     }
 
     /// Export the database to human-readable JSON.
@@ -356,10 +388,12 @@ impl VectorDb {
     /// [`export_json`](Self::export_json), rebuilding the search index.
     pub fn import_json(path: impl AsRef<Path>) -> Result<Self, VectorDbError> {
         let snapshot: OwnedDbSnapshot = serde_json::from_slice(&fs::read(path)?)?;
-        // JSON carries no graph, so the index is rebuilt from the records.
+        // JSON carries no graph and is always full precision, so the index is
+        // rebuilt from the records and the encoding is Float32.
         Self::from_parts(
             snapshot.dimension,
             snapshot.index_kind,
+            Encoding::Float32,
             snapshot.records,
             None,
         )
@@ -370,12 +404,14 @@ impl VectorDb {
     fn from_parts(
         dimension: Option<usize>,
         index_kind: IndexKind,
+        encoding: Encoding,
         records: BTreeMap<u64, Record>,
         index_data: Option<IndexData>,
     ) -> Result<Self, VectorDbError> {
         let mut db = Self::empty(None, index_kind).expect("no dimension cannot fail");
         db.dimension = dimension;
         db.records = records;
+        db.encoding = encoding;
         db.validate_database()?;
         match (index_kind, index_data) {
             // A persisted graph is reconstructed directly — no rebuild.
@@ -703,6 +739,42 @@ mod tests {
             assert!((b.score - a.score).abs() < 1e-6);
         }
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn scalar_quantized_file_is_smaller_and_searchable() {
+        let dimension = 16;
+        let mut db = VectorDb::with_dimension(dimension).unwrap();
+        db.set_encoding(Encoding::ScalarU8);
+        for id in 0..20u64 {
+            db.insert(record(id, sample_vector(id, dimension))).unwrap();
+        }
+        let query = sample_vector(3, dimension); // matches record 3 exactly
+        let before = db.search(&query, 1).unwrap()[0].record.id;
+
+        let q_path = temp_path("q", "lvdb");
+        let f_path = temp_path("f", "lvdb");
+        db.save_to_path(&q_path).unwrap();
+        let mut f32_db = db.clone();
+        f32_db.set_encoding(Encoding::Float32);
+        f32_db.save_to_path(&f_path).unwrap();
+
+        // The quantized file is meaningfully smaller.
+        let q_size = fs::metadata(&q_path).unwrap().len();
+        let f_size = fs::metadata(&f_path).unwrap().len();
+        assert!(
+            q_size < f_size,
+            "quantized {q_size} should be < f32 {f_size}"
+        );
+
+        // Round-trips: encoding preserved, and search still finds the same record.
+        let loaded = VectorDb::load_from_path(&q_path).unwrap();
+        assert_eq!(loaded.encoding(), Encoding::ScalarU8);
+        assert_eq!(loaded.len(), 20);
+        assert_eq!(loaded.search(&query, 1).unwrap()[0].record.id, before);
+
+        fs::remove_file(q_path).unwrap();
+        fs::remove_file(f_path).unwrap();
     }
 
     #[test]

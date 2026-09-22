@@ -72,7 +72,7 @@ flowchart TB
 | **API** | Public, stable surface apps call. | `VectorDb`, `Record`, `SearchResult`, `VectorDbError` | `Collection`, streaming iterators |
 | **Query** | Decide *how* to answer a search: filter strategy, index vs. brute force, scoring, limit. | `search_filtered` routes unfiltered queries to the index; keeps filtered search exact | full planner (§5) |
 | **Index** | Nearest-neighbour lookup behind one trait. | crate-internal `VectorIndex` trait with `BruteForce` + `AnnIndex`; `VectorDb` holds a `Box<dyn VectorIndex>` chosen via `IndexKind`; graph persisted in the file | per-layer HNSW hierarchy |
-| **Codec** | How a vector is encoded in bytes. | raw `f32` via serde | `f32`, scalar-quantized `int8`, product quantization |
+| **Codec** | How a vector is encoded in bytes. | `f32` and scalar-quantized `int8` (chosen via `Encoding`) | product quantization |
 | **Storage** | The on-disk format, I/O, mmap, durability. | `.lvdb` binary (versioned, CRC-checked) via `save_to_path`/`load_from_path`; JSON via `export_json`/`import_json` | offset table, mmap, journal (§4) |
 
 **Key refactor:** today `VectorDb` owns everything. We split index behind a
@@ -342,8 +342,12 @@ flowchart LR
   rebuilds). *Journal deferred:* persistence is temp-file + atomic rename, which
   is already crash-safe — a write-ahead journal only pays off once we do
   incremental in-place page writes, which we don't.
-- **M6 — quantization.** Scalar quantization (4× smaller), then product
-  quantization (8–32×).
+- **M6 — quantization. ✅ Done (scalar).** `Encoding::ScalarU8` /
+  `lvdb create --encoding int8` stores each component as one byte against a
+  global min/max range (format v1.2, backward compatible) — 4× smaller vectors
+  on disk, dequantized to `f32` on load. Works with `VectorDb` and `MmapDb`.
+  *Product quantization (8–32×) deferred:* it needs k-means codebook training,
+  a substantial algorithm of its own.
 - **M7 — reach.** A C ABI / PyO3 bindings so non-Rust apps embed it; a
   single-writer/multi-reader concurrency story.
 

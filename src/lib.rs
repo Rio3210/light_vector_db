@@ -21,7 +21,7 @@ mod mmap;
 mod record;
 mod storage;
 
-pub use db::{IndexKind, VectorDb};
+pub use db::{Encoding, IndexKind, VectorDb};
 pub use distance::cosine_similarity;
 pub use error::VectorDbError;
 pub use index::hnsw::{AnnIndex, AnnParams};
