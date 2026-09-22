@@ -257,7 +257,8 @@ testing." Every command operates on one file.
 |---|---|
 | `lvdb create <file> --dim N --metric cosine` | Make an empty database. |
 | `lvdb insert <file> --id 1 --vector @vec.json --text "…" --meta topic=rust` | Add a record (vector from arg, file, or stdin). |
-| `lvdb search <file> --vector @q.json -k 10 --filter topic=rust` | Query; prints ranked hits. |
+| `lvdb delete <file> --id 1` | Remove a record (then compact). |
+| `lvdb search <file> --vector @q.json -k 10 --filter topic=rust [--mmap]` | Query; prints ranked hits. |
 | `lvdb stats <file>` | Count, dimension, metric, index type, layers, file size. |
 | `lvdb export <file> out.json` / `lvdb import in.json <file>` | The human-readable bridge. |
 | `lvdb compact <file>` | Reclaim tombstoned space. |
@@ -334,8 +335,13 @@ flowchart LR
   demand. Uses `memmap2` (first dependency beyond serde, approved). Header
   checksum is verified; the body checksum is skipped in mmap mode (verifying it
   would page in every vector and defeat the purpose).
-- **M5 — mutability at scale.** Tombstoned deletes, `compact`, and a journal for
-  safe in-place writes.
+- **M5 — mutability at scale. ✅ Done (deletes + compaction).** `delete`
+  tombstones instead of rebuilding (stays O(log n)); search over-fetches to skip
+  tombstoned nodes; `VectorDb::compact` / `lvdb compact` rebuild once to reclaim
+  them; a database with pending tombstones saves without a persisted index (load
+  rebuilds). *Journal deferred:* persistence is temp-file + atomic rename, which
+  is already crash-safe — a write-ahead journal only pays off once we do
+  incremental in-place page writes, which we don't.
 - **M6 — quantization.** Scalar quantization (4× smaller), then product
   quantization (8–32×).
 - **M7 — reach.** A C ABI / PyO3 bindings so non-Rust apps embed it; a
