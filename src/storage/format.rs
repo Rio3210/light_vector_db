@@ -250,6 +250,113 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<DecodedDb, VectorDbError> {
     Ok((dimension, index_kind, records, index_data))
 }
 
+/// The parts of a `.lvdb` file needed to search it via memory-mapping: the
+/// small owned sections (ids, payloads) plus where the big vectors block lives.
+///
+/// The vectors themselves stay in the memory map and are read on demand — never
+/// copied into the heap here — so a large file can be searched without loading
+/// it all into RAM.
+pub(crate) struct MmapLayout {
+    pub dimension: Option<usize>,
+    pub ids: Vec<u64>,
+    pub payloads: Vec<(String, Metadata)>,
+    /// Byte offset of the contiguous vectors block within the mapped file.
+    pub vectors_offset: usize,
+    /// Vector stride (number of `f32`s per vector).
+    pub stride: usize,
+}
+
+/// Parse the header, ids, and payloads of mapped `.lvdb` bytes, leaving the
+/// vectors block untouched in the map.
+///
+/// Verifies the header checksum but deliberately **not** the body checksum:
+/// that would read every vector page and defeat the point of memory-mapping.
+/// The vectors region is bounds-checked so on-demand reads stay in range.
+pub(crate) fn parse_mmap(bytes: &[u8]) -> Result<MmapLayout, VectorDbError> {
+    if bytes.len() < HEADER_LEN {
+        return Err(VectorDbError::Corrupt("file shorter than header"));
+    }
+    let header = &bytes[..HEADER_LEN];
+    if &header[0..4] != MAGIC {
+        return Err(VectorDbError::Corrupt("bad magic: not an .lvdb file"));
+    }
+    let stored_header_crc =
+        u32::from_le_bytes(header[HEADER_CRC_OFFSET..HEADER_LEN].try_into().unwrap());
+    if crc32(&header[..HEADER_CRC_OFFSET]) != stored_header_crc {
+        return Err(VectorDbError::Corrupt("header checksum mismatch"));
+    }
+    let major = u16::from_le_bytes(header[4..6].try_into().unwrap());
+    let minor = u16::from_le_bytes(header[6..8].try_into().unwrap());
+    if major != VERSION_MAJOR {
+        return Err(VectorDbError::UnsupportedVersion { major, minor });
+    }
+
+    let flags = u32::from_le_bytes(header[8..12].try_into().unwrap());
+    let dimension = if flags & FLAG_DIMENSION_PRESENT != 0 {
+        Some(u32::from_le_bytes(header[12..16].try_into().unwrap()) as usize)
+    } else {
+        None
+    };
+    let count = u64::from_le_bytes(header[20..28].try_into().unwrap()) as usize;
+    let stride = u32::from_le_bytes(header[28..32].try_into().unwrap()) as usize;
+    if count > 0 && stride == 0 {
+        return Err(VectorDbError::Corrupt("records present but zero stride"));
+    }
+
+    // Ids come first, right after the header.
+    let mut ids = Vec::new();
+    {
+        let mut reader = Reader::new(&bytes[HEADER_LEN..]);
+        for _ in 0..count {
+            ids.push(reader.u64()?);
+        }
+    }
+
+    // The vectors block follows the ids; bounds-check it, then skip over it.
+    let vectors_offset = HEADER_LEN
+        .checked_add(
+            count
+                .checked_mul(8)
+                .ok_or(VectorDbError::Corrupt("size overflow"))?,
+        )
+        .ok_or(VectorDbError::Corrupt("size overflow"))?;
+    let vectors_len = count
+        .checked_mul(stride)
+        .and_then(|n| n.checked_mul(4))
+        .ok_or(VectorDbError::Corrupt("size overflow"))?;
+    let payloads_offset = vectors_offset
+        .checked_add(vectors_len)
+        .ok_or(VectorDbError::Corrupt("size overflow"))?;
+    if payloads_offset > bytes.len() {
+        return Err(VectorDbError::Corrupt("vectors section out of range"));
+    }
+
+    // Payloads follow the vectors block.
+    let mut payloads = Vec::new();
+    {
+        let mut reader = Reader::new(&bytes[payloads_offset..]);
+        for _ in 0..count {
+            let text = reader.string()?;
+            let meta_count = reader.u32()? as usize;
+            let mut metadata = Metadata::new();
+            for _ in 0..meta_count {
+                let key = reader.string()?;
+                let value = reader.string()?;
+                metadata.insert(key, value);
+            }
+            payloads.push((text, metadata));
+        }
+    }
+
+    Ok(MmapLayout {
+        dimension,
+        ids,
+        payloads,
+        vectors_offset,
+        stride,
+    })
+}
+
 /// Append a length-prefixed UTF-8 string to `buf`.
 fn put_str(buf: &mut Vec<u8>, value: &str) {
     buf.extend_from_slice(&(value.len() as u32).to_le_bytes());
@@ -380,6 +487,26 @@ mod tests {
         let (_, _, decoded, decoded_index) = decode(&bytes).unwrap();
         assert_eq!(decoded, records);
         assert_eq!(decoded_index, Some(index));
+    }
+
+    #[test]
+    fn parse_mmap_locates_sections() {
+        let records = sample(); // ids 1 and 2, dim 2
+        let bytes = encode(Some(2), IndexKind::Exact, &records, None);
+        let layout = parse_mmap(&bytes).unwrap();
+
+        assert_eq!(layout.dimension, Some(2));
+        assert_eq!(layout.stride, 2);
+        assert_eq!(layout.ids, vec![1, 2]);
+        assert_eq!(layout.payloads.len(), 2);
+        assert_eq!(layout.payloads[0].0, "record 1");
+        assert_eq!(layout.payloads[0].1["k"], "v1");
+
+        // Reading the first vector from the reported offset matches the record.
+        let start = layout.vectors_offset;
+        let x = f32::from_le_bytes(bytes[start..start + 4].try_into().unwrap());
+        let y = f32::from_le_bytes(bytes[start + 4..start + 8].try_into().unwrap());
+        assert_eq!(vec![x, y], records[&1].vector);
     }
 
     #[test]

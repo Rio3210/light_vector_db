@@ -5,4 +5,4 @@
 
 mod format;
 
-pub(crate) use format::{decode, encode};
+pub(crate) use format::{decode, encode, parse_mmap};

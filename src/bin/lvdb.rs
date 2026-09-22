@@ -7,7 +7,7 @@
 //! ```text
 //! lvdb create <file> --dim N [--index exact|hnsw]
 //! lvdb insert <file> --id N --vector 0.1,0.2,... [--text "..."] [--meta k=v]... [--upsert]
-//! lvdb search <file> --vector 0.1,0.2,... [-k N] [--filter k=v]...
+//! lvdb search <file> --vector 0.1,0.2,... [-k N] [--filter k=v]... [--mmap]
 //! lvdb stats  <file>
 //! lvdb export <file> <out.json>
 //! lvdb import <in.json> <file>
@@ -20,7 +20,7 @@ use std::error::Error;
 use std::fs;
 use std::process::ExitCode;
 
-use light_vector_db::{AnnParams, IndexKind, Metadata, Record, VectorDb};
+use light_vector_db::{AnnParams, IndexKind, Metadata, MmapDb, Record, SearchResult, VectorDb};
 
 type CliResult = Result<(), Box<dyn Error>>;
 
@@ -37,8 +37,9 @@ COMMANDS:
     insert <file> --id N --vector 0.1,0.2,... [--text \"...\"] [--meta k=v]... [--upsert]
         Add (or, with --upsert, replace) a record.
 
-    search <file> --vector 0.1,0.2,... [-k N] [--filter k=v]...
+    search <file> --vector 0.1,0.2,... [-k N] [--filter k=v]... [--mmap]
         Search for the nearest records; prints ranked hits.
+        --mmap scans the file in place without loading vectors into memory.
 
     stats <file>
         Show record count, dimension, index kind, and file size.
@@ -125,7 +126,7 @@ fn insert(rest: &[String]) -> CliResult {
 }
 
 fn search(rest: &[String]) -> CliResult {
-    let args = Parsed::parse(rest, &[])?;
+    let args = Parsed::parse(rest, &["mmap"])?;
     let file = args.positional(0, "file")?;
     let query = parse_vector(args.required("vector")?)?;
     let limit: usize = args.get("limit").unwrap_or("10").parse()?;
@@ -138,11 +139,21 @@ fn search(rest: &[String]) -> CliResult {
         filter.insert(key.to_string(), value.to_string());
     }
 
-    let db = VectorDb::load_from_path(file)?;
-    let hits = db.search_filtered(&query, limit, &filter)?;
+    // --mmap searches the file in place (exact brute force) without loading the
+    // vectors into memory; otherwise load the database and use its index.
+    let hits = if args.flag("mmap") {
+        MmapDb::open(file)?.search_filtered(&query, limit, &filter)?
+    } else {
+        VectorDb::load_from_path(file)?.search_filtered(&query, limit, &filter)?
+    };
+    print_hits(&hits);
+    Ok(())
+}
+
+fn print_hits(hits: &[SearchResult]) {
     if hits.is_empty() {
         println!("no results");
-        return Ok(());
+        return;
     }
     for (rank, hit) in hits.iter().enumerate() {
         println!(
@@ -153,7 +164,6 @@ fn search(rest: &[String]) -> CliResult {
             hit.record.text
         );
     }
-    Ok(())
 }
 
 fn stats(rest: &[String]) -> CliResult {

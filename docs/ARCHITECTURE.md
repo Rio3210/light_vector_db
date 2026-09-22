@@ -272,7 +272,7 @@ is a real choice — I'll flag them, not add them silently:
 
 | Need | Minimal option | Trade-off |
 |---|---|---|
-| Memory-mapping | `memmap2` | Tiny, ubiquitous, essentially the standard. Hard to avoid for real mmap. **Recommend adding at M4.** |
+| Memory-mapping | `memmap2` | Tiny, ubiquitous, essentially the standard. Hard to avoid for real mmap. **✅ Added at M4** (approved). |
 | Header checksum | hand-rolled CRC32, or `crc32fast` | Hand-roll keeps zero deps; `crc32fast` is faster. **Recommend hand-roll first.** |
 | CLI arg parsing | hand-rolled, or `clap` | `clap` is ergonomic but heavy; a hand-rolled parser keeps the "zero deps" story. **Recommend hand-roll for v1.** |
 | Binary (de)serialization | hand-rolled `byteorder`-style, or a crate | Hand-rolling the format teaches the most and keeps deps at zero. **Recommend hand-roll — it's the point.** |
@@ -327,7 +327,13 @@ flowchart LR
   backward compatible) and reconstructed on load instead of rebuilt — with
   bounds-checked validation so a tampered file can't cause an out-of-bounds
   read. Exact indexes and JSON still rebuild.
-- **M4 — mmap.** Zero-copy vector reads; open huge files in small RAM. (`memmap2`.)
+- **M4 — mmap. ✅ Done.** `MmapDb` (`src/mmap.rs`, `lvdb search --mmap`)
+  memory-maps a `.lvdb` file and scans it for search without loading the vectors
+  block into RAM — the OS pages it in on demand. Read-only, exact brute force;
+  only ids and payloads are read up front, vectors are read from the map on
+  demand. Uses `memmap2` (first dependency beyond serde, approved). Header
+  checksum is verified; the body checksum is skipped in mmap mode (verifying it
+  would page in every vector and defeat the purpose).
 - **M5 — mutability at scale.** Tombstoned deletes, `compact`, and a journal for
   safe in-place writes.
 - **M6 — quantization.** Scalar quantization (4× smaller), then product
