@@ -10,6 +10,7 @@ keywords = ["vector", "database", "embeddings", "search", "similarity"]
 categories = ["database-implementations"]
 
 [dependencies]
+memmap2 = "0.9"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 

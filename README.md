@@ -36,7 +36,8 @@
 - [x] `lvdb` command-line tool
 - [x] On-disk (persisted) index — the graph is stored in the `.lvdb` file, so
   loading never rebuilds it
-- [ ] Memory-mapped reads for large files
+- [x] Memory-mapped reads — scan a file larger than RAM without loading its
+  vectors (`MmapDb`, or `lvdb search --mmap`)
 - [ ] Optional embedding-provider integrations (e.g. a local Ollama helper)
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design and milestone plan.
@@ -113,6 +114,7 @@ cargo run --bin lvdb -- insert  notes.lvdb --id 1 --vector 0.9,0.1,0 --text "the
 cargo run --bin lvdb -- insert  notes.lvdb --id 2 --vector 0.1,0.1,0.9 --text "rust is fast" --meta topic=rust
 cargo run --bin lvdb -- search  notes.lvdb --vector 0.85,0.15,0.05 -k 3
 cargo run --bin lvdb -- search  notes.lvdb --vector 0.85,0.15,0.05 --filter topic=rust
+cargo run --bin lvdb -- search  notes.lvdb --vector 0.85,0.15,0.05 --mmap   # memory-mapped scan
 cargo run --bin lvdb -- stats   notes.lvdb
 cargo run --bin lvdb -- export  notes.lvdb notes.json   # human-readable copy
 cargo run --bin lvdb -- import  notes.json notes.lvdb

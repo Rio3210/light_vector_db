@@ -132,6 +132,25 @@ fn export_then_import_round_trips() {
 }
 
 #[test]
+fn search_mmap_flag_works() {
+    let db = temp_db("mmap");
+    let path = db.to_str().unwrap();
+    run(&["create", path, "--dim", "3"]);
+    run(&[
+        "insert", path, "--id", "1", "--vector", "1,0,0", "--text", "near",
+    ]);
+    run(&[
+        "insert", path, "--id", "2", "--vector", "0,0,1", "--text", "far",
+    ]);
+
+    let (ok, out, err) = run(&["search", path, "--vector", "0.9,0,0.1", "-k", "1", "--mmap"]);
+    assert!(ok, "mmap search failed: {err}");
+    assert!(out.contains("id=1"), "mmap search output: {out}");
+
+    let _ = std::fs::remove_file(&db);
+}
+
+#[test]
 fn missing_args_fail_cleanly() {
     let (ok, _, err) = run(&["create", "/tmp/whatever.lvdb"]);
     assert!(!ok);
