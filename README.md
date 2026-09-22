@@ -1,5 +1,6 @@
 # light_vector_db
 
+[![CI](https://github.com/Rio3210/light_vector_db/actions/workflows/ci.yml/badge.svg)](https://github.com/Rio3210/light_vector_db/actions/workflows/ci.yml)
 [![Status](https://img.shields.io/badge/status-work%20in%20progress-orange.svg)](#-project-status)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust 2024](https://img.shields.io/badge/rust-2024%20edition-dea584.svg)](https://www.rust-lang.org/)
