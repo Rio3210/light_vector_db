@@ -179,6 +179,54 @@ fn search_mmap_flag_works() {
 }
 
 #[test]
+fn quantized_create_search_and_mmap() {
+    let db = temp_db("q");
+    let path = db.to_str().unwrap();
+    run(&["create", path, "--dim", "3", "--encoding", "int8"]);
+    run(&[
+        "insert",
+        path,
+        "--id",
+        "1",
+        "--vector",
+        "0.9,0.1,0",
+        "--text",
+        "near",
+    ]);
+    run(&[
+        "insert",
+        path,
+        "--id",
+        "2",
+        "--vector",
+        "0.1,0.1,0.9",
+        "--text",
+        "far",
+    ]);
+
+    // stats reports the encoding.
+    let (ok, out, err) = run(&["stats", path]);
+    assert!(ok, "stats failed: {err}");
+    assert!(out.contains("int8"), "stats encoding: {out}");
+
+    // Both normal and mmap search read the quantized vectors correctly.
+    let (_, out, _) = run(&["search", path, "--vector", "0.85,0.15,0.05", "-k", "1"]);
+    assert!(out.contains("id=1"), "search: {out}");
+    let (_, out, _) = run(&[
+        "search",
+        path,
+        "--vector",
+        "0.85,0.15,0.05",
+        "-k",
+        "1",
+        "--mmap",
+    ]);
+    assert!(out.contains("id=1"), "mmap search: {out}");
+
+    let _ = std::fs::remove_file(&db);
+}
+
+#[test]
 fn missing_args_fail_cleanly() {
     let (ok, _, err) = run(&["create", "/tmp/whatever.lvdb"]);
     assert!(!ok);

@@ -5,7 +5,7 @@
 //! dependency-free.
 //!
 //! ```text
-//! lvdb create <file> --dim N [--index exact|hnsw]
+//! lvdb create <file> --dim N [--index exact|hnsw] [--encoding f32|int8]
 //! lvdb insert <file> --id N --vector 0.1,0.2,... [--text "..."] [--meta k=v]... [--upsert]
 //! lvdb delete <file> --id N
 //! lvdb search <file> --vector 0.1,0.2,... [-k N] [--filter k=v]... [--mmap]
@@ -22,7 +22,9 @@ use std::error::Error;
 use std::fs;
 use std::process::ExitCode;
 
-use light_vector_db::{AnnParams, IndexKind, Metadata, MmapDb, Record, SearchResult, VectorDb};
+use light_vector_db::{
+    AnnParams, Encoding, IndexKind, Metadata, MmapDb, Record, SearchResult, VectorDb,
+};
 
 type CliResult = Result<(), Box<dyn Error>>;
 
@@ -33,8 +35,9 @@ USAGE:
     lvdb <command> [args]
 
 COMMANDS:
-    create <file> --dim N [--index exact|hnsw]
-        Create a new empty database file.
+    create <file> --dim N [--index exact|hnsw] [--encoding f32|int8]
+        Create a new empty database file. --encoding int8 stores vectors
+        scalar-quantized (4x smaller on disk, slightly lossy).
 
     insert <file> --id N --vector 0.1,0.2,... [--text \"...\"] [--meta k=v]... [--upsert]
         Add (or, with --upsert, replace) a record.
@@ -95,16 +98,19 @@ fn run(args: &[String]) -> CliResult {
 }
 
 fn create(rest: &[String]) -> CliResult {
-    let args = Parsed::parse(rest, &["upsert"])?;
+    let args = Parsed::parse(rest, &[])?;
     let file = args.positional(0, "file")?;
     let dim: usize = args.required("dim")?.parse()?;
     let index_kind = parse_index_kind(args.get("index").unwrap_or("exact"))?;
+    let encoding = parse_encoding(args.get("encoding").unwrap_or("f32"))?;
 
-    let db = VectorDb::with_index(dim, index_kind)?;
+    let mut db = VectorDb::with_index(dim, index_kind)?;
+    db.set_encoding(encoding);
     db.save_to_path(file)?;
     println!(
-        "Created {file}: dim={dim}, index={}",
-        index_kind_label(index_kind)
+        "Created {file}: dim={dim}, index={}, encoding={}",
+        index_kind_label(index_kind),
+        encoding_label(encoding)
     );
     Ok(())
 }
@@ -214,6 +220,7 @@ fn stats(rest: &[String]) -> CliResult {
             .map_or_else(|| "unset".to_string(), |d| d.to_string())
     );
     println!("index:     {}", index_kind_label(db.index_kind()));
+    println!("encoding:  {}", encoding_label(db.encoding()));
     println!("size:      {bytes} bytes");
     Ok(())
 }
@@ -243,6 +250,21 @@ fn parse_index_kind(value: &str) -> Result<IndexKind, Box<dyn Error>> {
         "exact" => Ok(IndexKind::Exact),
         "hnsw" => Ok(IndexKind::Hnsw(AnnParams::default())),
         other => Err(format!("unknown index kind '{other}' (expected exact or hnsw)").into()),
+    }
+}
+
+fn parse_encoding(value: &str) -> Result<Encoding, Box<dyn Error>> {
+    match value {
+        "f32" | "float32" => Ok(Encoding::Float32),
+        "int8" | "scalar" => Ok(Encoding::ScalarU8),
+        other => Err(format!("unknown encoding '{other}' (expected f32 or int8)").into()),
+    }
+}
+
+fn encoding_label(encoding: Encoding) -> &'static str {
+    match encoding {
+        Encoding::Float32 => "f32",
+        Encoding::ScalarU8 => "int8 (scalar-quantized)",
     }
 }
 

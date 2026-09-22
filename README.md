@@ -39,7 +39,7 @@
 - [x] Memory-mapped reads — scan a file larger than RAM without loading its
   vectors (`MmapDb`, or `lvdb search --mmap`)
 - [x] Tombstoned deletes + `compact` to reclaim space
-- [ ] Vector quantization to shrink files
+- [x] Scalar (int8) quantization — 4× smaller vectors on disk (`--encoding int8`)
 - [ ] Optional embedding-provider integrations (e.g. a local Ollama helper)
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design and milestone plan.
@@ -112,6 +112,7 @@ terminal (in the spirit of the `sqlite3` shell):
 
 ```powershell
 cargo run --bin lvdb -- create  notes.lvdb --dim 3 --index hnsw
+cargo run --bin lvdb -- create  small.lvdb --dim 3 --encoding int8   # 4x smaller vectors
 cargo run --bin lvdb -- insert  notes.lvdb --id 1 --vector 0.9,0.1,0 --text "the cat sat" --meta topic=animals
 cargo run --bin lvdb -- insert  notes.lvdb --id 2 --vector 0.1,0.1,0.9 --text "rust is fast" --meta topic=rust
 cargo run --bin lvdb -- search  notes.lvdb --vector 0.85,0.15,0.05 -k 3

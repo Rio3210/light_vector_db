@@ -14,7 +14,9 @@ use std::path::Path;
 
 use memmap2::Mmap;
 
-use crate::{Metadata, Record, SearchResult, VectorDbError, cosine_similarity, validate_numbers};
+use crate::{
+    Encoding, Metadata, Record, SearchResult, VectorDbError, cosine_similarity, validate_numbers,
+};
 
 /// A read-only, memory-mapped view of a `.lvdb` database.
 #[derive(Debug)]
@@ -25,6 +27,8 @@ pub struct MmapDb {
     payloads: Vec<(String, Metadata)>,
     vectors_offset: usize,
     stride: usize,
+    encoding: Encoding,
+    bounds: (f32, f32),
 }
 
 impl MmapDb {
@@ -49,6 +53,8 @@ impl MmapDb {
             payloads: layout.payloads,
             vectors_offset: layout.vectors_offset,
             stride: layout.stride,
+            encoding: layout.encoding,
+            bounds: layout.bounds,
         })
     }
 
@@ -122,13 +128,25 @@ impl MmapDb {
             .collect())
     }
 
-    /// Read vector `i` from the memory map into `buffer` (length == `stride`).
-    /// Touches only that vector's bytes, so the OS pages in just what is scored.
+    /// Read vector `i` from the memory map into `buffer` (length == `stride`),
+    /// decoding per the file's encoding. Touches only that vector's bytes, so
+    /// the OS pages in just what is scored.
     fn read_vector(&self, i: usize, buffer: &mut [f32]) {
-        let start = self.vectors_offset + i * self.stride * 4;
-        for (j, slot) in buffer.iter_mut().enumerate() {
-            let offset = start + j * 4;
-            *slot = f32::from_le_bytes(self.mmap[offset..offset + 4].try_into().unwrap());
+        match self.encoding {
+            Encoding::Float32 => {
+                let start = self.vectors_offset + i * self.stride * 4;
+                for (j, slot) in buffer.iter_mut().enumerate() {
+                    let offset = start + j * 4;
+                    *slot = f32::from_le_bytes(self.mmap[offset..offset + 4].try_into().unwrap());
+                }
+            }
+            Encoding::ScalarU8 => {
+                let (min, max) = self.bounds;
+                let start = self.vectors_offset + i * self.stride;
+                for (j, slot) in buffer.iter_mut().enumerate() {
+                    *slot = crate::storage::dequantize(self.mmap[start + j], min, max);
+                }
+            }
         }
     }
 
