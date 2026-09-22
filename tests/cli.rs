@@ -132,6 +132,34 @@ fn export_then_import_round_trips() {
 }
 
 #[test]
+fn delete_and_compact_flow() {
+    let db = temp_db("del");
+    let path = db.to_str().unwrap();
+    run(&["create", path, "--dim", "2", "--index", "hnsw"]);
+    run(&[
+        "insert", path, "--id", "1", "--vector", "1,0", "--text", "keep",
+    ]);
+    run(&[
+        "insert", path, "--id", "2", "--vector", "0,1", "--text", "drop",
+    ]);
+
+    let (ok, out, err) = run(&["delete", path, "--id", "2"]);
+    assert!(ok, "delete failed: {err}");
+    assert!(out.contains("1 records"), "delete output: {out}");
+
+    // The deleted record is gone from search and stats.
+    let (_, out, _) = run(&["search", path, "--vector", "0,1", "-k", "5"]);
+    assert!(!out.contains("id=2"), "deleted record still found: {out}");
+    let (_, out, _) = run(&["stats", path]);
+    assert!(out.contains("records:   1"), "stats after delete: {out}");
+
+    let (ok, _, err) = run(&["compact", path]);
+    assert!(ok, "compact failed: {err}");
+
+    let _ = std::fs::remove_file(&db);
+}
+
+#[test]
 fn search_mmap_flag_works() {
     let db = temp_db("mmap");
     let path = db.to_str().unwrap();

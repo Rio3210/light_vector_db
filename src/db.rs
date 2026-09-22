@@ -1,6 +1,6 @@
 //! The `VectorDb` collection: records, a pluggable index, and persistence.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -38,6 +38,9 @@ pub struct VectorDb {
     records: BTreeMap<u64, Record>,
     index_kind: IndexKind,
     index: Box<dyn VectorIndex>,
+    /// Ids deleted since the last rebuild. Their nodes still sit in `index`
+    /// (search skips them); `compact` reclaims them. Empty after any rebuild.
+    tombstones: BTreeSet<u64>,
 }
 
 /// Borrowed view of a [`VectorDb`] for serialization (no clone of records).
@@ -129,6 +132,7 @@ impl VectorDb {
             records: BTreeMap::new(),
             index_kind,
             index: new_index(index_kind, dimension)?,
+            tombstones: BTreeSet::new(),
         })
     }
 
@@ -149,17 +153,27 @@ impl VectorDb {
             return Err(VectorDbError::DuplicateId(record.id));
         }
         self.validate_vector(&record.vector)?;
-        self.index.insert(record.id, record.vector.clone())?;
-        self.records.insert(record.id, record);
+        let id = record.id;
+        if self.tombstones.contains(&id) {
+            // Reusing a just-deleted id: the index still holds a stale node for
+            // it, so rebuild to drop it rather than duplicate the id.
+            self.records.insert(id, record);
+            self.rebuild_index()?;
+        } else {
+            self.index.insert(id, record.vector.clone())?;
+            self.records.insert(id, record);
+        }
         Ok(())
     }
 
     pub fn upsert(&mut self, record: Record) -> Result<(), VectorDbError> {
         self.validate_vector(&record.vector)?;
         let id = record.id;
+        let was_tombstoned = self.tombstones.contains(&id);
         let replaces_existing = self.records.insert(id, record).is_some();
-        if replaces_existing {
-            // The old vector is still in the index; rebuild to drop it.
+        if replaces_existing || was_tombstoned {
+            // Replacing a live record, or reusing a deleted id, leaves a stale
+            // node in the index; rebuild to drop it.
             self.rebuild_index()?;
         } else {
             let vector = self.records[&id].vector.clone();
@@ -177,18 +191,36 @@ impl VectorDb {
             .records
             .remove(&id)
             .ok_or(VectorDbError::NotFound(id))?;
-        // Point removal from the index arrives in roadmap M5; rebuild for now.
-        self.rebuild_index()?;
+        // Tombstone instead of rebuilding: the node stays in the index but is
+        // skipped in results (its id is no longer in `records`), and `compact`
+        // reclaims it later. Deletes stay O(log n).
+        self.tombstones.insert(id);
         Ok(removed)
     }
 
-    /// Rebuild the search index from the records (the source of truth).
+    /// Reclaim deleted entries by rebuilding the index without the tombstoned
+    /// nodes. Returns how many tombstones were reclaimed.
+    ///
+    /// Deletes are cheap (they only tombstone); `compact` pays the one-time
+    /// rebuild. It also lets [`save_to_path`](Self::save_to_path) persist the
+    /// graph again (a database with pending tombstones saves without one).
+    pub fn compact(&mut self) -> Result<usize, VectorDbError> {
+        let reclaimed = self.tombstones.len();
+        if reclaimed > 0 {
+            self.rebuild_index()?;
+        }
+        Ok(reclaimed)
+    }
+
+    /// Rebuild the search index from the records (the source of truth). Any
+    /// tombstones are dropped, since the fresh index holds only live records.
     fn rebuild_index(&mut self) -> Result<(), VectorDbError> {
         let mut index = new_index(self.index_kind, self.dimension)?;
         for record in self.records.values() {
             index.insert(record.id, record.vector.clone())?;
         }
         self.index = index;
+        self.tombstones.clear();
         Ok(())
     }
 
@@ -214,7 +246,10 @@ impl VectorDb {
                 IndexKind::Hnsw(params) => params.ef_search,
                 IndexKind::Exact => 0,
             };
-            let hits = self.index.search(query, limit, ef)?;
+            // Over-fetch by the tombstone count so deleted-but-not-compacted
+            // nodes can't shrink the result below `limit`.
+            let fetch = limit.saturating_add(self.tombstones.len());
+            let hits = self.index.search(query, fetch, ef)?;
             return Ok(hits
                 .into_iter()
                 .filter_map(|(id, score)| {
@@ -223,6 +258,7 @@ impl VectorDb {
                         record: record.clone(),
                     })
                 })
+                .take(limit)
                 .collect());
         }
 
@@ -275,9 +311,15 @@ impl VectorDb {
     ///
     /// For a human-readable file, use [`export_json`](Self::export_json).
     pub fn save_to_path(&self, path: impl AsRef<Path>) -> Result<(), VectorDbError> {
-        // A graph index persists its structure so loading needn't rebuild it;
-        // an exact index has nothing to store (`persist` returns None).
-        let index = self.index.persist();
+        // Persist the graph only when it's clean. With pending tombstones the
+        // index still references deleted ids, so we skip it and let load rebuild
+        // from the (live) records; `compact` first for an instant-load file.
+        // An exact index has nothing to store (`persist` returns None).
+        let index = if self.tombstones.is_empty() {
+            self.index.persist()
+        } else {
+            None
+        };
         let bytes = storage::encode(
             self.dimension,
             self.index_kind,
@@ -511,6 +553,75 @@ mod tests {
         let hits = db.search(&[1.0, 0.0], 5).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].record.id, 2);
+    }
+
+    #[test]
+    fn bulk_delete_still_returns_k_live() {
+        // Delete the top-ranked records; over-fetch must still return k live hits.
+        let mut db = VectorDb::with_index(2, IndexKind::Hnsw(AnnParams::default())).unwrap();
+        for i in 0..10u64 {
+            let angle = i as f32 * 0.05;
+            db.insert(record(i, vec![1.0 - angle, angle])).unwrap();
+        }
+        for id in [0u64, 1, 2] {
+            db.delete(id).unwrap();
+        }
+        let hits = db.search(&[1.0, 0.0], 3).unwrap();
+        assert_eq!(
+            hits.len(),
+            3,
+            "over-fetch should still return k live results"
+        );
+        for hit in &hits {
+            assert!(![0, 1, 2].contains(&hit.record.id));
+        }
+    }
+
+    #[test]
+    fn delete_then_reinsert_has_no_duplicate() {
+        let mut db = VectorDb::with_dimension(2).unwrap();
+        db.insert(record(1, vec![1.0, 0.0])).unwrap();
+        db.insert(record(2, vec![0.0, 1.0])).unwrap();
+        db.delete(1).unwrap();
+        db.insert(record(1, vec![0.5, 0.5])).unwrap(); // reuse the deleted id
+
+        assert_eq!(db.len(), 2);
+        let hits = db.search(&[0.5, 0.5], 10).unwrap();
+        let ones = hits.iter().filter(|h| h.record.id == 1).count();
+        assert_eq!(ones, 1, "id 1 must appear once, not duplicated");
+        assert_eq!(db.get(1).unwrap().vector, vec![0.5, 0.5]);
+    }
+
+    #[test]
+    fn compact_reclaims_tombstones() {
+        let mut db = VectorDb::with_index(2, IndexKind::Hnsw(AnnParams::default())).unwrap();
+        for i in 0..5u64 {
+            db.insert(record(i, vec![i as f32, 1.0])).unwrap();
+        }
+        db.delete(0).unwrap();
+        db.delete(3).unwrap();
+        assert_eq!(db.compact().unwrap(), 2);
+        assert_eq!(db.compact().unwrap(), 0); // already clean
+        assert_eq!(db.len(), 3);
+        for hit in &db.search(&[0.0, 1.0], 5).unwrap() {
+            assert!(hit.record.id != 0 && hit.record.id != 3);
+        }
+    }
+
+    #[test]
+    fn save_with_tombstones_loads_clean() {
+        let path = temp_path("tomb", "lvdb");
+        let mut db = VectorDb::with_index(2, IndexKind::Hnsw(AnnParams::default())).unwrap();
+        db.insert(record(1, vec![1.0, 0.0])).unwrap();
+        db.insert(record(2, vec![0.0, 1.0])).unwrap();
+        db.delete(2).unwrap(); // pending tombstone → saved without a persisted index
+
+        db.save_to_path(&path).unwrap();
+        let loaded = VectorDb::load_from_path(&path).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded.get(2).is_none());
+        assert_eq!(loaded.search(&[1.0, 0.0], 5).unwrap()[0].record.id, 1);
+        fs::remove_file(path).unwrap();
     }
 
     #[test]

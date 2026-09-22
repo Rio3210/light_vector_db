@@ -7,8 +7,10 @@
 //! ```text
 //! lvdb create <file> --dim N [--index exact|hnsw]
 //! lvdb insert <file> --id N --vector 0.1,0.2,... [--text "..."] [--meta k=v]... [--upsert]
+//! lvdb delete <file> --id N
 //! lvdb search <file> --vector 0.1,0.2,... [-k N] [--filter k=v]... [--mmap]
 //! lvdb stats  <file>
+//! lvdb compact <file>
 //! lvdb export <file> <out.json>
 //! lvdb import <in.json> <file>
 //! ```
@@ -37,12 +39,18 @@ COMMANDS:
     insert <file> --id N --vector 0.1,0.2,... [--text \"...\"] [--meta k=v]... [--upsert]
         Add (or, with --upsert, replace) a record.
 
+    delete <file> --id N
+        Remove a record (then compact the file).
+
     search <file> --vector 0.1,0.2,... [-k N] [--filter k=v]... [--mmap]
         Search for the nearest records; prints ranked hits.
         --mmap scans the file in place without loading vectors into memory.
 
     stats <file>
         Show record count, dimension, index kind, and file size.
+
+    compact <file>
+        Rebuild and re-persist the index (reclaims deleted entries).
 
     export <file> <out.json>      Write a human-readable JSON copy.
     import <in.json> <file>       Build a database file from JSON.
@@ -72,8 +80,10 @@ fn run(args: &[String]) -> CliResult {
     match command.as_str() {
         "create" => create(rest),
         "insert" => insert(rest),
+        "delete" => delete(rest),
         "search" => search(rest),
         "stats" => stats(rest),
+        "compact" => compact(rest),
         "export" => export(rest),
         "import" => import(rest),
         "help" | "--help" | "-h" => {
@@ -122,6 +132,31 @@ fn insert(rest: &[String]) -> CliResult {
     }
     db.save_to_path(file)?;
     println!("Inserted id={id} into {file} ({} records)", db.len());
+    Ok(())
+}
+
+fn delete(rest: &[String]) -> CliResult {
+    let args = Parsed::parse(rest, &[])?;
+    let file = args.positional(0, "file")?;
+    let id: u64 = args.required("id")?.parse()?;
+
+    let mut db = VectorDb::load_from_path(file)?;
+    db.delete(id)?;
+    // One-shot on the CLI: compact so the file stays clean and instant-loading.
+    db.compact()?;
+    db.save_to_path(file)?;
+    println!("Deleted id={id} from {file} ({} records)", db.len());
+    Ok(())
+}
+
+fn compact(rest: &[String]) -> CliResult {
+    let args = Parsed::parse(rest, &[])?;
+    let file = args.positional(0, "file")?;
+
+    let mut db = VectorDb::load_from_path(file)?;
+    db.compact()?;
+    db.save_to_path(file)?;
+    println!("Compacted {file} ({} records)", db.len());
     Ok(())
 }
 
